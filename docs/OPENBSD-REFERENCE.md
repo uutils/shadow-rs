@@ -1,91 +1,94 @@
 # OpenBSD Security Reference for shadow-rs
 
-Reference notes from OpenBSD's passwd implementation (ISC license).
-These are design patterns and hardening techniques to adopt.
+Detailed analysis of OpenBSD's passwd implementation (ISC license).
+Source: `cvsweb.openbsd.org/src/usr.bin/passwd/` and `src/lib/libutil/passwd.c`.
 
-## Key OpenBSD Security Patterns
+## Findings — What OpenBSD Does That We Should
 
-### 1. pledge(2) — Syscall Restriction
+### Already Implemented
 
-OpenBSD's passwd calls `pledge("stdio rpath wpath cpath flock proc exec getpw id tty", NULL)`
-immediately after startup, restricting the process to only the syscalls it needs.
+| # | Pattern | Status |
+|---|---------|--------|
+| Signal blocking during file writes | #38 — `SignalBlocker` RAII |
+| Privilege drop during PAM conversation | #39 — `PrivDrop` RAII |
+| Environment sanitization | #40 — `sanitize_env()` |
+| Landlock stub | #41 — documented, needs crate dep |
+| Absolute paths for subprocesses | #20 — `/usr/sbin/nscd` |
+| Password zeroing | #7 — `zeroize` crate |
+| Secure temp file permissions | #19 — `0o600` from creation |
+| TOCTOU-resistant locking | #18 — lock-via-hard-link |
 
-**Linux equivalent**: `seccomp-bpf` or `landlock`. We should investigate adding
-a seccomp filter after initialization to restrict syscalls.
+### Not Yet Implemented
 
-**Status**: Not implemented. Future work.
+#### CRITICAL: Core Dump Suppression
+OpenBSD's `pw_init()` sets `RLIMIT_CORE` to 0. A core dump from a setuid
+passwd process could expose password hashes and plaintext passwords.
 
-### 2. unveil(2) — Filesystem Restriction
+```rust
+nix::sys::resource::setrlimit(Resource::RLIMIT_CORE, 0, 0)?;
+```
 
-OpenBSD restricts file access to only:
-- `/etc/` (read/write for shadow files)
-- `/dev/tty` (read/write for password prompts)
+Also: `prctl(PR_SET_DUMPABLE, 0)` prevents ptrace attachment.
 
-**Linux equivalent**: `landlock` (kernel 5.13+). Could restrict filesystem
-access to only `/etc/passwd`, `/etc/shadow`, `/dev/tty`.
+#### HIGH: Resource Limit Hardening
+OpenBSD raises `RLIMIT_FSIZE` to infinity before file writes. A malicious
+caller could `ulimit -f 1` before invoking setuid passwd, truncating
+`/etc/shadow` mid-write.
 
-**Status**: Not implemented. Future work.
+```rust
+nix::sys::resource::setrlimit(Resource::RLIMIT_FSIZE, RLIM_INFINITY, RLIM_INFINITY)?;
+```
 
-### 3. Privilege Separation
+#### HIGH: setuid(0) Before File Operations
+OpenBSD calls `setuid(0)` before the critical section to consolidate both
+real and effective UID to root. Some filesystem configurations check real UID.
 
-OpenBSD drops privileges as early as possible. The passwd binary:
-1. Reads files as root
-2. Drops to the target user's UID for PAM interaction
-3. Re-elevates only for the final file write
+#### MEDIUM: Zero-Length Output Guard
+OpenBSD checks that the output file is non-zero-length before replacing the
+original. A zero-length `/etc/shadow` locks out all users.
 
-**Our approach**: We use `caller_is_root()` (getuid) for authorization but
-run the entire operation with full privileges. Could improve by dropping
-euid to caller's uid during PAM conversation.
+```rust
+// In atomic_write, after the closure runs:
+if tmp_file.metadata()?.len() == 0 {
+    return Err(ShadowError::Other("refusing to write zero-length file"));
+}
+```
 
-### 4. Signal Handling
+#### MEDIUM: User Enumeration Prevention
+OpenBSD rejects non-root callers targeting other usernames before PAM auth.
+Our current flow lets PAM auth fail, potentially leaking timing information
+about whether the account exists.
 
-OpenBSD blocks `SIGINT`, `SIGQUIT`, `SIGHUP`, `SIGTSTP` during critical
-sections (file writes) to prevent partial updates, then restores them.
+#### MEDIUM: Clean SIGINT Handler During Password Input
+OpenBSD's `kbintr` handler uses `_exit(0)` and `dprintf` (async-signal-safe).
+Prints "Password unchanged." and exits cleanly. Our PAM EchoGuard may not
+run its Drop destructor on signal-induced termination.
 
-**Our approach**: We rely on RAII (lock drop, echo guard drop) but don't
-block signals during the file write itself. A signal between the rename
-and the lock release is harmless, but a signal during the write closure
-could leave a partial temp file (mitigated by TmpGuard).
+#### LOW: Umask Reset
+OpenBSD saves/restores umask around lock file creation. Defense-in-depth
+against edge cases where umask interacts with file permissions.
 
-### 5. Memory Zeroing
+## Implementation Priority
 
-OpenBSD uses `explicit_bzero()` on all password buffers — this cannot be
-optimized away by the compiler (unlike `memset`).
+**Immediate** (before any release):
+1. Core dump suppression — 5 lines
+2. Resource limit hardening — 10 lines
+3. Zero-length output guard — 5 lines in `atomic_write`
 
-**Our approach**: We use the `zeroize` crate which uses volatile writes
-to prevent compiler optimization. Equivalent security.
+**Next sprint**:
+4. setuid(0) consolidation
+5. User enumeration prevention
+6. SIGINT handler for password input
 
-### 6. File Locking
-
-OpenBSD uses `flock(2)` (advisory locks) instead of `.lock` files.
-The `.lock` file approach (used by GNU shadow-utils and us) has the
-TOCTOU race we mitigated with hard-link pattern.
-
-`flock(2)` is cleaner but:
-- Not compatible with GNU shadow-utils convention
-- Doesn't work across NFS (neither do .lock files)
-
-**Our approach**: Hard-link pattern is correct for GNU compatibility.
-
-### 7. Atomic File Replacement
-
-OpenBSD's `pw_mkdb` creates the file with restrictive permissions from
-the start (like our fix in #19), fsyncs, then renames.
-
-**Our approach**: Same pattern. Already implemented correctly.
-
-## Recommendations for shadow-rs
-
-| Priority | What | OpenBSD Pattern | Effort |
-|----------|------|-----------------|--------|
-| High | Drop privileges during PAM conversation | `seteuid(caller_uid)` | Medium |
-| High | Block signals during file write | `sigprocmask` | Low |
-| Medium | Add landlock filesystem restriction (Linux 5.13+) | Like `unveil` | Medium |
-| Medium | Add seccomp filter after init | Like `pledge` | High |
-| Low | Environment sanitization | Clear env except essentials | Low |
+**Roadmap**:
+7. Full Landlock implementation
+8. seccomp-bpf filter
+9. Umask handling
 
 ## File References
 
-- OpenBSD passwd.c: https://cvsweb.openbsd.org/src/usr.bin/passwd/
+- OpenBSD passwd.c: https://cvsweb.openbsd.org/src/usr.bin/passwd/passwd.c
+- OpenBSD local_passwd.c: https://cvsweb.openbsd.org/src/usr.bin/passwd/local_passwd.c
+- OpenBSD pw_init/pw_lock: https://cvsweb.openbsd.org/src/lib/libutil/passwd.c
 - OpenBSD pw_dup.c: https://cvsweb.openbsd.org/src/lib/libc/gen/pw_dup.c
-- sudo-rs privilege handling: https://github.com/trifectatechfoundation/sudo-rs
+- OpenBSD pwd_check.c: https://cvsweb.openbsd.org/src/usr.bin/passwd/pwd_check.c
