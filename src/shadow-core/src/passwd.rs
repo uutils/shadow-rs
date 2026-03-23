@@ -22,7 +22,7 @@ use std::str::FromStr;
 use crate::error::ShadowError;
 
 /// A single entry from `/etc/passwd`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PasswdEntry {
     /// Login name.
     pub name: String,
@@ -85,10 +85,10 @@ impl FromStr for PasswdEntry {
 
         let uid = uid_str
             .parse::<u32>()
-            .map_err(|e| ShadowError::Parse(format!("invalid UID '{uid_str}': {e}")))?;
+            .map_err(|e| ShadowError::Parse(format!("invalid UID '{uid_str}': {e}").into()))?;
         let gid = gid_str
             .parse::<u32>()
-            .map_err(|e| ShadowError::Parse(format!("invalid GID '{gid_str}': {e}")))?;
+            .map_err(|e| ShadowError::Parse(format!("invalid GID '{gid_str}': {e}").into()))?;
 
         Ok(Self {
             name: name.to_string(),
@@ -116,11 +116,10 @@ pub fn read_passwd_file(path: &Path) -> Result<Vec<PasswdEntry>, ShadowError> {
 
     for line in reader.lines() {
         let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        entries.push(trimmed.parse()?);
+        entries.push(line.parse()?);
     }
 
     Ok(entries)

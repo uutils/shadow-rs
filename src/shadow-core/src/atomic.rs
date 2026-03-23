@@ -16,8 +16,38 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::ShadowError;
+
+/// Drop guard that auto-deletes a temporary file unless explicitly committed.
+///
+/// Ensures the tmp file is cleaned up on any error path, including panics.
+struct TmpGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TmpGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
 
 /// Atomically replace a file's contents.
 ///
@@ -33,7 +63,7 @@ where
     F: FnOnce(&mut File) -> Result<(), ShadowError>,
 {
     let dir = target.parent().ok_or_else(|| {
-        ShadowError::Other(format!("no parent directory for {}", target.display()))
+        ShadowError::Other(format!("no parent directory for {}", target.display()).into())
     })?;
 
     let tmp_path = tmp_path_for(target);
@@ -44,6 +74,8 @@ where
         .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()))
         .unwrap_or(0o600);
 
+    let mut guard = TmpGuard::new(tmp_path.clone());
+
     let mut tmp_file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -51,12 +83,7 @@ where
         .open(&tmp_path)
         .map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
 
-    let result = f(&mut tmp_file);
-
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-        return result;
-    }
+    f(&mut tmp_file)?;
 
     // Flush and fsync.
     tmp_file
@@ -68,6 +95,9 @@ where
     // Atomic rename.
     fs::rename(&tmp_path, target).map_err(|e| ShadowError::IoPath(e, target.to_owned()))?;
 
+    // The rename succeeded — prevent the guard from deleting the (now-gone) tmp file.
+    guard.commit();
+
     // Fsync the parent directory to ensure the rename is durable.
     if let Ok(dir_fd) = File::open(dir) {
         let _ = nix::unistd::fsync(dir_fd.as_raw_fd());
@@ -76,14 +106,20 @@ where
     Ok(())
 }
 
-/// Generate a temporary file path in the same directory as the target.
+/// Atomic counter for unique temp file names across threads.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique temporary file path in the same directory as the target.
+///
+/// Uses PID + atomic counter to avoid collisions between threads.
 fn tmp_path_for(target: &Path) -> PathBuf {
     let file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let pid = std::process::id();
-    target.with_file_name(format!(".{file_name}.shadow-rs.{pid}.tmp"))
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{file_name}.shadow-rs.{pid}.{seq}.tmp"))
 }
 
 #[cfg(test)]

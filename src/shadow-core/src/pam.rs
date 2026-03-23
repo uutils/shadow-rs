@@ -366,22 +366,19 @@ fn prompt_for_input(
 
 /// Read a line from `/dev/tty`, optionally disabling echo.
 ///
-/// Opens `/dev/tty` directly (not stdin) to ensure we talk to the real
-/// terminal even if stdin has been redirected. Uses `nix::sys::termios` to
-/// disable `ECHO` for password prompts and restores the original settings
-/// afterward (including on error, via a drop guard).
+/// Opens `/dev/tty` once with read+write mode (not stdin) to ensure we talk
+/// to the real terminal even if stdin has been redirected. Uses
+/// `nix::sys::termios` to disable `ECHO` for password prompts and restores
+/// the original settings afterward (including on error, via a drop guard).
 fn read_from_tty(message: &PamMessage, echo: bool) -> io::Result<String> {
-    let tty = File::options().read(true).write(true).open("/dev/tty")?;
+    let mut tty = File::options().read(true).write(true).open("/dev/tty")?;
 
     // Show prompt.
     if !message.msg.is_null() {
         // SAFETY: `msg` is a null-terminated C string provided by PAM.
         let prompt = unsafe { CStr::from_ptr(message.msg) };
-        let prompt_bytes = prompt.to_bytes();
-        // Write prompt directly to the tty fd.
-        let mut tty_write = File::options().write(true).open("/dev/tty")?;
-        tty_write.write_all(prompt_bytes)?;
-        tty_write.flush()?;
+        tty.write_all(prompt.to_bytes())?;
+        tty.flush()?;
     }
 
     // Disable echo if needed, with a guard to restore on drop.
@@ -392,15 +389,13 @@ fn read_from_tty(message: &PamMessage, echo: bool) -> io::Result<String> {
     };
 
     // Read one line from the tty.
-    let tty_read = File::open("/dev/tty")?;
-    let mut reader = io::BufReader::new(tty_read);
+    let mut reader = io::BufReader::new(tty.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
     // Print a newline after hidden input so the cursor moves down.
     if !echo {
-        let mut tty_newline = File::options().write(true).open("/dev/tty")?;
-        let _ = tty_newline.write_all(b"\n");
+        tty.write_all(b"\n")?;
     }
 
     // Strip trailing newline.
@@ -562,9 +557,9 @@ impl PamContext {
     /// Returns `ShadowError::Auth` if `pam_start` fails.
     pub fn new(service: &str, user: &str, mode: ConvMode) -> Result<Self, ShadowError> {
         let service_c = CString::new(service)
-            .map_err(|_| ShadowError::Auth("service name contains null byte".to_string()))?;
+            .map_err(|_| ShadowError::Auth("service name contains null byte".into()))?;
         let user_c = CString::new(user)
-            .map_err(|_| ShadowError::Auth("username contains null byte".to_string()))?;
+            .map_err(|_| ShadowError::Auth("username contains null byte".into()))?;
 
         let conv_data = Box::new(ConvData { mode });
         let conv_data_ptr = (&raw const *conv_data).cast_mut();
@@ -591,14 +586,14 @@ impl PamContext {
         };
 
         if rc != return_code::PAM_SUCCESS {
-            return Err(ShadowError::Auth(format!(
-                "pam_start failed with code {rc}"
-            )));
+            return Err(ShadowError::Auth(
+                format!("pam_start failed with code {rc}").into(),
+            ));
         }
 
         if handle.is_null() {
             return Err(ShadowError::Auth(
-                "pam_start returned success but null handle".to_string(),
+                "pam_start returned success but null handle".into(),
             ));
         }
 
@@ -627,7 +622,7 @@ impl PamContext {
         self.last_status = rc;
 
         if rc != return_code::PAM_SUCCESS {
-            return Err(ShadowError::Auth(self.strerror(rc)));
+            return Err(ShadowError::Auth(self.strerror(rc).into()));
         }
 
         Ok(())
@@ -646,7 +641,7 @@ impl PamContext {
         self.last_status = rc;
 
         if rc != return_code::PAM_SUCCESS {
-            return Err(ShadowError::Auth(self.strerror(rc)));
+            return Err(ShadowError::Auth(self.strerror(rc).into()));
         }
 
         Ok(())
@@ -666,7 +661,7 @@ impl PamContext {
         self.last_status = rc;
 
         if rc != return_code::PAM_SUCCESS {
-            return Err(ShadowError::Auth(self.strerror(rc)));
+            return Err(ShadowError::Auth(self.strerror(rc).into()));
         }
 
         Ok(())
@@ -681,7 +676,7 @@ impl PamContext {
     /// Returns `ShadowError::Auth` if `pam_set_item` fails.
     pub fn set_item_str(&mut self, item: i32, value: &str) -> Result<(), ShadowError> {
         let value_c = CString::new(value)
-            .map_err(|_| ShadowError::Auth("item value contains null byte".to_string()))?;
+            .map_err(|_| ShadowError::Auth("item value contains null byte".into()))?;
 
         // SAFETY: `self.handle` is valid. `value_c` is a valid null-terminated
         // C string. PAM copies the value internally, so `value_c` does not need
@@ -691,7 +686,7 @@ impl PamContext {
         self.last_status = rc;
 
         if rc != return_code::PAM_SUCCESS {
-            return Err(ShadowError::Auth(self.strerror(rc)));
+            return Err(ShadowError::Auth(self.strerror(rc).into()));
         }
 
         Ok(())

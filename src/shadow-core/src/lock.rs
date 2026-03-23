@@ -107,10 +107,9 @@ impl FileLock {
             }
 
             if Instant::now() >= deadline {
-                return Err(ShadowError::Lock(format!(
-                    "cannot acquire lock {}: timed out",
-                    lock_path.display(),
-                )));
+                return Err(ShadowError::Lock(
+                    format!("cannot acquire lock {}: timed out", lock_path.display()).into(),
+                ));
             }
 
             thread::sleep(RETRY_INTERVAL);
@@ -125,10 +124,9 @@ impl FileLock {
     pub fn release(mut self) -> Result<(), ShadowError> {
         self.released = true;
         fs::remove_file(&self.lock_path).map_err(|e| {
-            ShadowError::Lock(format!(
-                "cannot release lock {}: {e}",
-                self.lock_path.display()
-            ))
+            ShadowError::Lock(
+                format!("cannot release lock {}: {e}", self.lock_path.display()).into(),
+            )
         })
     }
 }
@@ -166,11 +164,14 @@ fn write_pid_file(tmp_path: &Path) -> Result<(), ShadowError> {
         .truncate(true)
         .mode(0o600)
         .open(tmp_path)
-        .map_err(|e| ShadowError::Lock(format!("cannot create {}: {e}", tmp_path.display())))?;
+        .map_err(|e| {
+            ShadowError::Lock(format!("cannot create {}: {e}", tmp_path.display()).into())
+        })?;
 
     let pid = unistd::getpid();
-    write!(file, "{pid}")
-        .map_err(|e| ShadowError::Lock(format!("cannot write {}: {e}", tmp_path.display())))?;
+    write!(file, "{pid}").map_err(|e| {
+        ShadowError::Lock(format!("cannot write {}: {e}", tmp_path.display()).into())
+    })?;
 
     Ok(())
 }
@@ -191,8 +192,13 @@ fn is_stale_lock(lock_path: &Path) -> bool {
     }
 
     // Signal 0 checks if the process exists without actually sending a signal.
+    // Only ESRCH means "no such process". EPERM means the process exists but
+    // we lack permission to signal it — that is a valid lock holder.
     let pid = nix::unistd::Pid::from_raw(pid);
-    nix::sys::signal::kill(pid, None).is_err()
+    matches!(
+        nix::sys::signal::kill(pid, None),
+        Err(nix::errno::Errno::ESRCH)
+    )
 }
 
 #[cfg(test)]

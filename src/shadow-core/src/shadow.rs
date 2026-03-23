@@ -21,7 +21,7 @@ use std::str::FromStr;
 use crate::error::ShadowError;
 
 /// A single entry from `/etc/shadow`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShadowEntry {
     /// Login name (must match an `/etc/passwd` entry).
     pub name: String,
@@ -114,7 +114,7 @@ fn parse_optional_field(field: &str) -> Result<Option<i64>, ShadowError> {
         field
             .parse::<i64>()
             .map(Some)
-            .map_err(|e| ShadowError::Parse(format!("invalid numeric field '{field}': {e}")))
+            .map_err(|e| ShadowError::Parse(format!("invalid numeric field '{field}': {e}").into()))
     }
 }
 
@@ -209,11 +209,10 @@ pub fn read_shadow_file(path: &Path) -> Result<Vec<ShadowEntry>, ShadowError> {
 
     for line in reader.lines() {
         let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        entries.push(trimmed.parse()?);
+        entries.push(line.parse()?);
     }
 
     Ok(entries)
@@ -281,15 +280,9 @@ mod tests {
     #[test]
     fn test_is_locked_with_bang() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!$6$hash".into(),
+            ..Default::default()
         };
         assert!(entry.is_locked());
     }
@@ -297,15 +290,9 @@ mod tests {
     #[test]
     fn test_is_locked_without_bang() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         assert!(!entry.is_locked());
     }
@@ -313,15 +300,8 @@ mod tests {
     #[test]
     fn test_has_no_password_empty() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: String::new(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            ..Default::default()
         };
         assert!(entry.has_no_password());
     }
@@ -329,15 +309,9 @@ mod tests {
     #[test]
     fn test_has_no_password_with_hash() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         assert!(!entry.has_no_password());
     }
@@ -345,15 +319,9 @@ mod tests {
     #[test]
     fn test_lock_adds_bang() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         entry.lock();
         assert_eq!(entry.passwd, "!$6$hash");
@@ -362,15 +330,9 @@ mod tests {
     #[test]
     fn test_lock_already_locked_adds_another() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!$6$hash".into(),
+            ..Default::default()
         };
         entry.lock();
         assert_eq!(entry.passwd, "!!$6$hash");
@@ -379,15 +341,9 @@ mod tests {
     #[test]
     fn test_unlock_removes_bang() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!$6$hash".into(),
+            ..Default::default()
         };
         assert!(entry.unlock());
         assert_eq!(entry.passwd, "$6$hash");
@@ -396,15 +352,9 @@ mod tests {
     #[test]
     fn test_unlock_not_locked_returns_false() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         assert!(!entry.unlock());
         assert_eq!(entry.passwd, "$6$hash", "should be unchanged");
@@ -414,15 +364,9 @@ mod tests {
     fn test_unlock_only_bang_returns_false() {
         // "!" alone cannot be unlocked — would result in empty password.
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!".into(),
+            ..Default::default()
         };
         assert!(!entry.unlock());
         assert_eq!(entry.passwd, "!", "should be unchanged");
@@ -432,15 +376,9 @@ mod tests {
     fn test_unlock_double_bang_returns_false() {
         // "!!" — removing one '!' leaves "!" which is still invalid.
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!!".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!!".into(),
+            ..Default::default()
         };
         assert!(!entry.unlock());
         assert_eq!(entry.passwd, "!!", "should be unchanged");
@@ -449,15 +387,9 @@ mod tests {
     #[test]
     fn test_delete_password_clears() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         entry.delete_password();
         assert_eq!(entry.passwd, "");
@@ -466,15 +398,10 @@ mod tests {
     #[test]
     fn test_expire_sets_zero() {
         let mut entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
             last_change: Some(19500),
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            ..Default::default()
         };
         entry.expire();
         assert_eq!(entry.last_change, Some(0));
@@ -483,15 +410,9 @@ mod tests {
     #[test]
     fn test_status_char_locked() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "!$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "!$6$hash".into(),
+            ..Default::default()
         };
         assert_eq!(entry.status_char(), "L");
     }
@@ -499,15 +420,8 @@ mod tests {
     #[test]
     fn test_status_char_no_password() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: String::new(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            ..Default::default()
         };
         assert_eq!(entry.status_char(), "NP");
     }
@@ -515,15 +429,9 @@ mod tests {
     #[test]
     fn test_status_char_usable() {
         let entry = ShadowEntry {
-            name: "u".to_string(),
-            passwd: "$6$hash".to_string(),
-            last_change: None,
-            min_age: None,
-            max_age: None,
-            warn_days: None,
-            inactive_days: None,
-            expire_date: None,
-            reserved: String::new(),
+            name: "u".into(),
+            passwd: "$6$hash".into(),
+            ..Default::default()
         };
         assert_eq!(entry.status_char(), "P");
     }

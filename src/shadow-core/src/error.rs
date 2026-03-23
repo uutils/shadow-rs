@@ -5,6 +5,7 @@
 
 //! Unified error types for shadow-rs utilities.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
@@ -24,22 +25,22 @@ pub enum ShadowError {
     IoPath(#[source] io::Error, PathBuf),
     /// File format parse error.
     #[error("parse error: {0}")]
-    Parse(String),
+    Parse(Cow<'static, str>),
     /// Lock acquisition failed.
     #[error("lock error: {0}")]
-    Lock(String),
+    Lock(Cow<'static, str>),
     /// Validation error (invalid username, UID range, etc.).
     #[error("{0}")]
-    Validation(String),
+    Validation(Cow<'static, str>),
     /// Authentication error (PAM failure, wrong password, etc.).
     #[error("authentication error: {0}")]
-    Auth(String),
+    Auth(Cow<'static, str>),
     /// Permission denied.
     #[error("permission denied: {0}")]
-    Permission(String),
+    Permission(Cow<'static, str>),
     /// Generic error with message.
     #[error("{0}")]
-    Other(String),
+    Other(Cow<'static, str>),
 }
 
 /// Print an error message prefixed with the utility name to stderr.

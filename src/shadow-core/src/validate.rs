@@ -32,9 +32,10 @@ pub fn validate_username(name: &str) -> Result<(), ShadowError> {
     }
 
     if name.len() > MAX_USERNAME_LEN {
-        return Err(ShadowError::Validation(format!(
-            "username '{name}' exceeds maximum length of {MAX_USERNAME_LEN} characters"
-        )));
+        return Err(ShadowError::Validation(
+            format!("username '{name}' exceeds maximum length of {MAX_USERNAME_LEN} characters")
+                .into(),
+        ));
     }
 
     let mut chars = name.chars();
@@ -44,32 +45,76 @@ pub fn validate_username(name: &str) -> Result<(), ShadowError> {
     };
 
     if !first.is_ascii_lowercase() && first != '_' {
-        return Err(ShadowError::Validation(format!(
-            "username '{name}' must start with a lowercase letter or underscore"
-        )));
+        return Err(ShadowError::Validation(
+            format!("username '{name}' must start with a lowercase letter or underscore").into(),
+        ));
     }
 
     for ch in chars {
         if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '_' && ch != '-' && ch != '.' {
-            return Err(ShadowError::Validation(format!(
-                "username '{name}' contains invalid character '{ch}'"
-            )));
+            return Err(ShadowError::Validation(
+                format!("username '{name}' contains invalid character '{ch}'").into(),
+            ));
         }
     }
 
     if name.ends_with('.') {
-        return Err(ShadowError::Validation(format!(
-            "username '{name}' must not end with a period"
-        )));
+        return Err(ShadowError::Validation(
+            format!("username '{name}' must not end with a period").into(),
+        ));
     }
 
     if name.chars().all(|c| c == '.') {
-        return Err(ShadowError::Validation(format!(
-            "username '{name}' must not consist only of periods"
-        )));
+        return Err(ShadowError::Validation(
+            format!("username '{name}' must not consist only of periods").into(),
+        ));
     }
 
     Ok(())
+}
+
+/// A validated Linux username.
+///
+/// Guarantees that the contained string passes all `validate_username` rules.
+/// Use `Username::new()` to validate and construct.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Username(String);
+
+impl Username {
+    /// Validate and create a new `Username`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShadowError::Validation` if the name violates any rule.
+    pub fn new(name: &str) -> Result<Self, ShadowError> {
+        validate_username(name)?;
+        Ok(Self(name.to_string()))
+    }
+
+    /// Get the username as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Username {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for Username {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Username {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
 }
 
 #[cfg(test)]
@@ -159,5 +204,23 @@ mod tests {
     #[test]
     fn test_uppercase_rejected() {
         assert!(validate_username("Root").is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // Username newtype tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_username_newtype_valid() {
+        let u = Username::new("testuser").unwrap();
+        assert_eq!(u.as_str(), "testuser");
+        assert_eq!(&*u, "testuser"); // Deref
+        assert_eq!(format!("{u}"), "testuser"); // Display
+    }
+
+    #[test]
+    fn test_username_newtype_invalid() {
+        assert!(Username::new("").is_err());
+        assert!(Username::new("Root").is_err());
     }
 }
