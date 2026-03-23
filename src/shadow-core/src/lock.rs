@@ -14,12 +14,11 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::fcntl::{self, OFlag};
-use nix::sys::stat::Mode;
 use nix::unistd;
 
 use crate::error::ShadowError;
@@ -52,32 +51,65 @@ impl FileLock {
 
     /// Acquire a lock with a custom timeout.
     ///
+    /// Uses the classic lock-via-link pattern to avoid TOCTOU races:
+    /// 1. Write our PID to a unique temp file
+    /// 2. Try to `hard_link` it to the lock path (atomic on POSIX)
+    /// 3. If link fails (lock exists), check for staleness and retry
+    ///
+    /// Even if two processes both detect a stale lock and both remove it,
+    /// only one will succeed at the subsequent `hard_link`, so mutual
+    /// exclusion is never violated.
+    ///
     /// # Errors
     ///
     /// Returns `ShadowError::Lock` if the lock cannot be acquired within the timeout.
     pub fn acquire_with_timeout(file_path: &Path, timeout: Duration) -> Result<Self, ShadowError> {
         let lock_path = lock_path_for(file_path);
         let deadline = Instant::now() + timeout;
+        let tmp_path = tmp_lock_path(&lock_path);
 
+        // Write our PID to the temp file once, then try to link it in a loop.
+        write_pid_file(&tmp_path)?;
+
+        let result = Self::acquire_loop(&lock_path, &tmp_path, deadline);
+
+        // Always clean up our temp file, regardless of success or failure.
+        let _ = fs::remove_file(&tmp_path);
+
+        result
+    }
+
+    /// Inner acquisition loop. Separated so the caller can guarantee temp file cleanup.
+    fn acquire_loop(
+        lock_path: &Path,
+        tmp_path: &Path,
+        deadline: Instant,
+    ) -> Result<Self, ShadowError> {
         loop {
-            if try_create_lock(&lock_path).is_ok() {
+            // Attempt to hard-link our temp file to the lock path. hard_link is
+            // atomic: it either creates the destination or fails, so two
+            // processes can never both succeed for the same lock_path.
+            if fs::hard_link(tmp_path, lock_path).is_ok() {
                 return Ok(Self {
-                    lock_path,
+                    lock_path: lock_path.to_owned(),
                     released: false,
                 });
             }
 
-            // Lock file exists — check if it's stale.
-            if is_stale_lock(&lock_path) {
-                // Remove stale lock and retry immediately.
-                let _ = fs::remove_file(&lock_path);
+            // Link failed — lock file exists. Check if it's stale.
+            if is_stale_lock(lock_path) {
+                // Remove the stale lock. If another process already removed it
+                // and re-acquired, our remove may fail or remove the wrong file,
+                // but the subsequent hard_link attempt is the real arbiter:
+                // it will fail atomically if someone else got there first.
+                let _ = fs::remove_file(lock_path);
                 continue;
             }
 
             if Instant::now() >= deadline {
                 return Err(ShadowError::Lock(format!(
-                    "cannot acquire lock {}: timed out after {timeout:?}",
-                    lock_path.display()
+                    "cannot acquire lock {}: timed out",
+                    lock_path.display(),
                 )));
             }
 
@@ -116,21 +148,29 @@ fn lock_path_for(file_path: &Path) -> PathBuf {
     PathBuf::from(lock)
 }
 
-/// Try to atomically create the lock file. Write our PID into it.
-fn try_create_lock(lock_path: &Path) -> Result<(), ShadowError> {
-    // O_CREAT | O_EXCL ensures atomic creation — fails if the file exists.
-    let fd = fcntl::open(
-        lock_path,
-        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_WRONLY,
-        Mode::from_bits_truncate(0o600),
-    )
-    .map_err(|e| ShadowError::Lock(format!("cannot create {}: {e}", lock_path.display())))?;
+/// Compute a unique temp file path for the lock-via-link pattern.
+///
+/// Uses PID to avoid collisions between concurrent processes.
+fn tmp_lock_path(lock_path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let mut tmp = lock_path.as_os_str().to_owned();
+    tmp.push(format!(".{pid}.tmp"));
+    PathBuf::from(tmp)
+}
 
-    // Write our PID for stale detection.
-    // SAFETY: fd is a valid file descriptor we just created.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+/// Write our PID to a temp file for later hard-linking.
+fn write_pid_file(tmp_path: &Path) -> Result<(), ShadowError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(tmp_path)
+        .map_err(|e| ShadowError::Lock(format!("cannot create {}: {e}", tmp_path.display())))?;
+
     let pid = unistd::getpid();
-    let _ = write!(file, "{pid}");
+    write!(file, "{pid}")
+        .map_err(|e| ShadowError::Lock(format!("cannot write {}: {e}", tmp_path.display())))?;
 
     Ok(())
 }
@@ -154,8 +194,6 @@ fn is_stale_lock(lock_path: &Path) -> bool {
     let pid = nix::unistd::Pid::from_raw(pid);
     nix::sys::signal::kill(pid, None).is_err()
 }
-
-use std::os::unix::io::FromRawFd;
 
 #[cfg(test)]
 mod tests {

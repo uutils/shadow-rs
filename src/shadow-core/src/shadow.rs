@@ -148,24 +148,51 @@ impl FromStr for ShadowEntry {
     type Err = ShadowError;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() != 9 {
-            return Err(ShadowError::Parse(format!(
-                "expected 9 colon-separated fields, got {}",
-                fields.len()
-            )));
+        // Use splitn(10) to detect extra fields without allocating a Vec.
+        let mut fields = line.splitn(10, ':');
+
+        let name = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing name".into()))?;
+        let passwd = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing passwd".into()))?;
+        let last_change_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing last_change".into()))?;
+        let min_age_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing min_age".into()))?;
+        let max_age_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing max_age".into()))?;
+        let warn_days_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing warn_days".into()))?;
+        let inactive_days_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing inactive_days".into()))?;
+        let expire_date_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing expire_date".into()))?;
+        let reserved = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing reserved".into()))?;
+
+        if fields.next().is_some() {
+            return Err(ShadowError::Parse("too many fields".into()));
         }
 
         Ok(Self {
-            name: fields[0].to_string(),
-            passwd: fields[1].to_string(),
-            last_change: parse_optional_field(fields[2])?,
-            min_age: parse_optional_field(fields[3])?,
-            max_age: parse_optional_field(fields[4])?,
-            warn_days: parse_optional_field(fields[5])?,
-            inactive_days: parse_optional_field(fields[6])?,
-            expire_date: parse_optional_field(fields[7])?,
-            reserved: fields[8].to_string(),
+            name: name.to_string(),
+            passwd: passwd.to_string(),
+            last_change: parse_optional_field(last_change_str)?,
+            min_age: parse_optional_field(min_age_str)?,
+            max_age: parse_optional_field(max_age_str)?,
+            warn_days: parse_optional_field(warn_days_str)?,
+            inactive_days: parse_optional_field(inactive_days_str)?,
+            expire_date: parse_optional_field(expire_date_str)?,
+            reserved: reserved.to_string(),
         })
     }
 }
