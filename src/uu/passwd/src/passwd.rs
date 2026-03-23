@@ -152,7 +152,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         let show_all = matches.get_flag(options::ALL);
 
         // Non-root users can only view their own status.
-        if !is_root() {
+        if !caller_is_root() {
             if show_all {
                 return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
             }
@@ -163,11 +163,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
 
         return cmd_status(&root, if show_all { None } else { Some(&target_user) });
-    }
-
-    // All remaining operations require root (euid 0).
-    if !is_root() {
-        return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
     }
 
     // Determine the mutation operation (if any).
@@ -183,6 +178,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let warn = matches.get_one::<i64>(options::WARNDAYS).copied();
     let inactive = matches.get_one::<i64>(options::INACTIVE).copied();
     let has_aging = min.is_some() || max.is_some() || warn.is_some() || inactive.is_some();
+
+    // Admin operations (lock/unlock/delete/expire/aging) require the real
+    // caller to be root. Non-root users can only change their own password
+    // (the default PAM path below).
+    if (has_mutation || has_aging) && !caller_is_root() {
+        return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
+    }
 
     // When a mutation flag and aging flags are both present, apply both in a
     // single `mutate_shadow` call so neither set of changes is lost.
@@ -443,7 +445,7 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()>
         };
 
         // Non-root users changing their own password must authenticate first.
-        if !is_root() {
+        if !caller_is_root() {
             if let Err(e) = pam.authenticate(0) {
                 return Err(PasswdError::PamError(e.to_string()).into());
             }
@@ -500,12 +502,13 @@ fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, PasswdError
     }
 }
 
-/// Check if the *real* user (caller) is root.
+/// Check if the *real* caller is root (not just setuid-root).
 ///
-/// Uses `getuid()` (real UID), NOT `geteuid()` (effective UID).
-/// When passwd is installed setuid-root, euid is always 0 for all callers.
-/// The real UID tells us if the caller is actually root or a regular user.
-fn is_root() -> bool {
+/// Uses `getuid()` (real UID). When passwd is installed setuid-root,
+/// euid is 0 for all callers, but real UID identifies who actually
+/// invoked the program. Use this for authorization decisions:
+/// "is this person allowed to lock/unlock other accounts?"
+fn caller_is_root() -> bool {
     nix::unistd::getuid().is_root()
 }
 
@@ -528,7 +531,7 @@ fn get_current_username() -> Result<String, PasswdError> {
 /// Must be root to call `chroot`. After `chroot`, chdir to `/` so the
 /// working directory is valid inside the new root.
 fn do_chroot(dir: &str) -> Result<(), PasswdError> {
-    if !is_root() {
+    if !caller_is_root() {
         return Err(PasswdError::PermissionDenied(
             "only root may use --root".into(),
         ));
