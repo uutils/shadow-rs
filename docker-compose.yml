@@ -1,0 +1,55 @@
+# Usage:
+#   docker compose run --rm debian          # shell on Debian Trixie
+#   docker compose run --rm debian cargo test
+#   docker compose run --rm alpine cargo test
+#   docker compose run --rm fedora cargo test
+#   docker compose up --build               # build all images
+#
+# The cargo registry cache is shared across Debian/Alpine (same CARGO_HOME path).
+# Fedora uses a separate cache (rustup installs to /root/.cargo).
+# Each distro gets its own target dir (different libc/toolchain = different binaries).
+
+x-common: &common
+  working_dir: /workspace
+  security_opt:
+    - seccomp:unconfined
+  cap_add:
+    - SYS_ADMIN
+
+services:
+  debian:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.debian
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-debian:/workspace/target
+
+  alpine:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.alpine
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-alpine:/workspace/target
+
+  fedora:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.fedora
+    volumes:
+      - .:/workspace
+      - cargo-cache-fedora:/root/.cargo/registry
+      - target-fedora:/workspace/target
+
+volumes:
+  cargo-cache:
+  cargo-cache-fedora:
+  target-debian:
+  target-alpine:
+  target-fedora:

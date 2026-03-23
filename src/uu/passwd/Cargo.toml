@@ -1,0 +1,23 @@
+[package]
+name = "uu_passwd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "passwd command — change user password (shadow-rs)"
+
+[lib]
+path = "src/passwd.rs"
+
+[[bin]]
+name = "passwd"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+shadow-core = { workspace = true, features = ["shadow", "pam"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

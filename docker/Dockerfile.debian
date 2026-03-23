@@ -1,0 +1,28 @@
+# shadow-rs development image — Debian Trixie (13)
+#
+# PAM: libpam0g-dev (Linux-PAM)
+# SELinux: libselinux1-dev
+# Default shell: /bin/bash
+# Shadow-utils package: login + passwd
+# Note: Trixie is now the default Debian for the Rust Docker image.
+
+FROM rust:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpam0g-dev \
+    libselinux1-dev \
+    libaudit-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy rustfmt \
+    && cargo install cargo-deny \
+    && curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
+
+RUN useradd -m -s /bin/bash testuser \
+    && useradd -m -s /bin/sh testuser2 \
+    && groupadd testgroup \
+    && usermod -aG testgroup testuser
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

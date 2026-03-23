@@ -1,0 +1,31 @@
+# shadow-rs development image — Alpine 3.23 (musl libc)
+#
+# PAM: linux-pam-dev (Linux-PAM, not OpenPAM)
+# SELinux: not available (Alpine doesn't ship SELinux)
+# Default shell: /bin/ash (busybox)
+# Shadow-utils package: shadow
+# Note: musl libc — different from glibc. Tests NSS/getpwent differences.
+#       No SELinux. Busybox shadow-utils may differ from GNU shadow-utils.
+
+FROM rust:alpine
+
+RUN apk add --no-cache \
+    musl-dev \
+    linux-pam-dev \
+    linux-headers \
+    pkgconf \
+    shadow \
+    bash \
+    curl
+
+RUN rustup component add clippy rustfmt \
+    && cargo install cargo-deny \
+    && curl -LsSf https://get.nexte.st/latest/linux-musl | tar zxf - -C /usr/local/cargo/bin
+
+RUN adduser -D -s /bin/bash testuser \
+    && adduser -D -s /bin/sh testuser2 \
+    && addgroup testgroup \
+    && addgroup testuser testgroup
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

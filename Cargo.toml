@@ -1,0 +1,74 @@
+# spell-checker:ignore uutils
+
+[package]
+name = "shadow-rs"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Memory-safe Rust reimplementation of Linux shadow-utils"
+repository = "https://github.com/shadow-utils-rs/shadow-rs"
+readme = "README.md"
+keywords = ["coreutils", "shadow", "passwd", "useradd", "linux"]
+categories = ["command-line-utilities", "os::unix-apis"]
+
+[workspace]
+members = [
+    "src/shadow-core",
+    "src/uu/passwd",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+authors = ["shadow-rs contributors"]
+repository = "https://github.com/shadow-utils-rs/shadow-rs"
+
+[workspace.dependencies]
+# Internal crates
+shadow-core = { path = "src/shadow-core" }
+
+# CLI
+clap = { version = "4", features = ["derive", "wrap_help"] }
+
+# Error handling
+thiserror = "2"
+
+# Unix/Linux
+nix = { version = "0.29", features = ["user", "fs", "process", "signal"] }
+libc = "0.2"
+
+# Testing
+proptest = "1"
+tempfile = "3"
+
+[dependencies]
+# Tool crates (optional, enabled by features)
+passwd = { optional = true, version = "0.0.1", package = "uu_passwd", path = "src/uu/passwd" }
+
+[features]
+default = ["passwd"]
+
+# Individual tools
+feat_passwd = ["passwd"]
+
+# Grouped features (add tools as implemented)
+feat_common = ["feat_passwd"]
+
+[[bin]]
+name = "shadow-rs"
+path = "src/bin/shadow-rs.rs"
+
+[profile.release]
+lto = true
+strip = true
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[workspace.lints.clippy]
+all = { level = "deny" }
+pedantic = { level = "warn" }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+# shadow-rs development image — Fedora 45
+#
+# PAM: pam-devel (Linux-PAM)
+# SELinux: libselinux-devel — SELinux is ENFORCING by default
+# Default shell: /bin/bash
+# Shadow-utils package: shadow-utils
+# Note: Fedora has different PAM stack config and login.defs defaults than Debian.
+#       SELinux is enforcing, which affects file context on /etc/passwd, /etc/shadow.
+
+FROM fedora:latest
+
+RUN dnf install -y \
+    gcc \
+    pam-devel \
+    libselinux-devel \
+    audit-libs-devel \
+    pkgconf-pkg-config \
+    shadow-utils \
+    && dnf clean all
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --component clippy,rustfmt
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN cargo install cargo-deny \
+    && curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /root/.cargo/bin
+
+RUN useradd -m -s /bin/bash testuser \
+    && useradd -m -s /bin/sh testuser2 \
+    && groupadd testgroup \
+    && usermod -aG testgroup testuser
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

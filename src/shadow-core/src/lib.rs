@@ -1,0 +1,39 @@
+// This file is part of the shadow-rs package.
+//
+// For the full copyright and license information, please view the LICENSE
+// file that was distributed with this source code.
+
+//! `shadow-core` — shared library for shadow-rs utilities.
+//!
+//! Provides file format parsers, atomic file operations, file locking,
+//! validation, and platform integration (PAM, `nscd`, `SELinux`, audit).
+
+pub mod error;
+pub mod passwd;
+pub mod validate;
+
+#[cfg(feature = "shadow")]
+pub mod shadow;
+
+#[cfg(feature = "group")]
+pub mod group;
+
+#[cfg(feature = "gshadow")]
+pub mod gshadow;
+
+#[cfg(feature = "login-defs")]
+pub mod login_defs;
+
+#[cfg(feature = "subid")]
+pub mod subid;
+
+#[cfg(feature = "pam")]
+pub mod pam;
+
+#[cfg(feature = "selinux")]
+pub mod selinux;
+
+pub mod atomic;
+pub mod lock;
+pub mod nscd;
+pub mod uid_alloc;
