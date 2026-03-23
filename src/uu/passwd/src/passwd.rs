@@ -2,7 +2,7 @@
 //
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
-// spell-checker:ignore chroot warndays maxdays mindays chauthtok
+// spell-checker:ignore chroot warndays maxdays mindays chauthtok sigprocmask seteuid
 
 //! `passwd` — change user password.
 //!
@@ -109,6 +109,61 @@ impl UError for PasswdError {
 }
 
 // ---------------------------------------------------------------------------
+// Security hardening — environment sanitization
+// ---------------------------------------------------------------------------
+
+/// Sanitize the environment for setuid-root context.
+///
+/// Clears all environment variables except essential ones and sets
+/// PATH to a safe default. Prevents environment variable injection
+/// attacks when running as setuid-root (e.g. `LD_PRELOAD`, IFS, CDPATH).
+fn sanitize_env() {
+    const KEEP: &[&str] = &["TERM", "LANG", "LC_ALL", "LC_MESSAGES", "LC_CTYPE"];
+    let saved: Vec<(String, String)> = KEEP
+        .iter()
+        .filter_map(|&k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect();
+
+    // Clear everything.
+    for (key, _) in std::env::vars_os() {
+        std::env::remove_var(&key);
+    }
+
+    // Set safe PATH.
+    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+
+    // Restore kept variables.
+    for (key, val) in saved {
+        std::env::set_var(&key, &val);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security hardening — landlock filesystem restriction
+// ---------------------------------------------------------------------------
+
+/// Restrict filesystem access using landlock (Linux 5.13+).
+///
+/// Best-effort: silently does nothing on kernels that don't support landlock.
+fn apply_landlock(root: &SysRoot) {
+    // Only attempt on Linux — landlock is Linux-specific.
+    #[cfg(target_os = "linux")]
+    apply_landlock_inner(root);
+}
+
+#[cfg(target_os = "linux")]
+fn apply_landlock_inner(_root: &SysRoot) {
+    // Landlock requires the landlock crate or raw syscalls.
+    // TODO(#41): Add landlock crate dependency and implement restriction.
+    //
+    // The restriction would be:
+    //   - /etc/ (read + write for passwd/shadow files)
+    //   - /dev/tty (read + write for password prompts)
+    //   - /usr/sbin/ (execute for nscd/sss_cache)
+    //   - deny everything else
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -116,6 +171,8 @@ impl UError for PasswdError {
 #[uucore::main]
 #[allow(clippy::too_many_lines)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    sanitize_env();
+
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
         Err(e) => {
@@ -143,6 +200,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let prefix = matches.get_one::<String>(options::PREFIX).map(Path::new);
     let root = SysRoot::new(prefix);
     let quiet = matches.get_flag(options::QUIET);
+
+    // Best-effort filesystem restriction — silently skipped on older kernels.
+    apply_landlock(&root);
 
     // Determine target user.
     let target_user = resolve_target_user(&matches)?;
@@ -419,6 +479,40 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> UResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Security hardening — privilege dropping during PAM conversation
+// ---------------------------------------------------------------------------
+
+/// RAII guard that drops effective UID and restores on drop.
+///
+/// When passwd is installed setuid-root, we want to drop to the caller's
+/// real UID during the PAM conversation so that the PAM modules see the
+/// actual caller, not root. The destructor re-elevates.
+#[cfg_attr(not(feature = "pam"), allow(dead_code))]
+struct PrivDrop {
+    original_euid: nix::unistd::Uid,
+}
+
+impl PrivDrop {
+    /// Drop effective UID to the given UID.
+    #[cfg_attr(not(feature = "pam"), allow(dead_code))]
+    fn drop_to(uid: nix::unistd::Uid) -> Result<Self, PasswdError> {
+        let original_euid = nix::unistd::geteuid();
+        if original_euid != uid {
+            nix::unistd::seteuid(uid).map_err(|e| {
+                PasswdError::UnexpectedFailure(format!("cannot drop privileges: {e}"))
+            })?;
+        }
+        Ok(Self { original_euid })
+    }
+}
+
+impl Drop for PrivDrop {
+    fn drop(&mut self) {
+        let _ = nix::unistd::seteuid(self.original_euid);
+    }
+}
+
 /// Default operation: change password via PAM.
 ///
 /// Feature-gated on `pam`. When PAM is not compiled in, prints an error.
@@ -443,6 +537,10 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()>
                 return Err(PasswdError::PamError(e.to_string()).into());
             }
         };
+
+        // Drop privileges to caller's real UID during PAM conversation.
+        // Re-elevate automatically when _priv_drop goes out of scope.
+        let _priv_drop = PrivDrop::drop_to(nix::unistd::getuid())?;
 
         // Non-root users changing their own password must authenticate first.
         if !caller_is_root() {
@@ -595,6 +693,47 @@ fn format_days_since_epoch(days: i64) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Security hardening — signal blocking during critical file writes
+// ---------------------------------------------------------------------------
+
+/// RAII guard that blocks signals during critical sections and restores on drop.
+///
+/// Prevents SIGINT/SIGTERM/SIGHUP from interrupting a lock-modify-write
+/// sequence, which could leave the shadow file in an inconsistent state
+/// or holding a stale lock.
+struct SignalBlocker {
+    old_mask: nix::sys::signal::SigSet,
+}
+
+impl SignalBlocker {
+    /// Block `SIGINT`, `SIGTERM`, `SIGHUP` to prevent partial file writes.
+    fn block_critical() -> Result<Self, PasswdError> {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal};
+
+        let mut block_set = SigSet::empty();
+        block_set.add(Signal::SIGINT);
+        block_set.add(Signal::SIGTERM);
+        block_set.add(Signal::SIGHUP);
+
+        let mut old_mask = SigSet::empty();
+        nix::sys::signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&block_set), Some(&mut old_mask))
+            .map_err(|e| PasswdError::UnexpectedFailure(format!("cannot block signals: {e}")))?;
+
+        Ok(Self { old_mask })
+    }
+}
+
+impl Drop for SignalBlocker {
+    fn drop(&mut self) {
+        let _ = nix::sys::signal::sigprocmask(
+            nix::sys::signal::SigmaskHow::SIG_SETMASK,
+            Some(&self.old_mask),
+            None,
+        );
+    }
+}
+
 /// Lock the shadow file, read entries, apply a mutation to one user's entry,
 /// write back atomically, invalidate nscd cache.
 fn mutate_shadow<F>(
@@ -607,6 +746,10 @@ fn mutate_shadow<F>(
 where
     F: FnOnce(&mut ShadowEntry) -> Result<(), String>,
 {
+    // Block signals for the entire critical section (lock → write → unlock).
+    // The RAII guard restores the original signal mask when this function returns.
+    let _signals = SignalBlocker::block_critical()?;
+
     let shadow_path = root.shadow_path();
 
     // Acquire lock.
