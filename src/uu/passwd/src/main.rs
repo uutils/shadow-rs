@@ -3,7 +3,4 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-fn main() {
-    let code = uu_passwd::uumain(std::env::args_os());
-    std::process::exit(code);
-}
+uucore::bin!(uu_passwd);

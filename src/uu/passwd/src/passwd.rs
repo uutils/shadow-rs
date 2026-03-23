@@ -8,6 +8,7 @@
 //!
 //! Drop-in replacement for GNU shadow-utils `passwd(1)`.
 
+use std::fmt;
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -16,6 +17,8 @@ use shadow_core::lock::FileLock;
 use shadow_core::shadow::{self, ShadowEntry};
 use shadow_core::sysroot::SysRoot;
 use shadow_core::{atomic, nscd};
+
+use uucore::error::{UError, UResult};
 
 mod options {
     pub const USER: &str = "user";
@@ -37,45 +40,104 @@ mod options {
     pub const STDIN: &str = "stdin";
 }
 
+/// Exit code constants for `passwd(1)`.
+///
+/// Kept as documentation and for use in tests. The canonical mapping lives in
+/// [`PasswdError::code`].
+#[cfg(test)]
 mod exit_codes {
-    pub const SUCCESS: i32 = 0;
-    pub const PERMISSION_DENIED: i32 = 1;
-    pub const INVALID_OPTIONS: i32 = 2;
-    pub const UNEXPECTED_FAILURE: i32 = 3;
     pub const PASSWD_FILE_MISSING: i32 = 4;
-    pub const FILE_BUSY: i32 = 5;
-    pub const INVALID_ARGUMENT: i32 = 6;
-    #[cfg_attr(not(feature = "pam"), allow(dead_code))]
     pub const PAM_ERROR: i32 = 10;
 }
 
-/// Entry point for the `passwd` utility.
-#[allow(clippy::too_many_lines)]
-pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
-    let matches = uu_app().try_get_matches_from(args);
+// ---------------------------------------------------------------------------
+// Error type — implements uucore::error::UError
+// ---------------------------------------------------------------------------
 
-    let matches = match matches {
+/// Errors that the `passwd` utility can produce.
+///
+/// Each variant maps to a specific exit code matching GNU `passwd(1)`:
+///   1 = permission denied, 3 = unexpected failure, 4 = shadow file missing,
+///   5 = file busy (lock), 10 = PAM error.
+///
+/// For clap-reported errors (exit 2 or 6), use [`AlreadyPrinted`] so the
+/// uucore wrapper does not duplicate the message clap already wrote.
+#[derive(Debug)]
+enum PasswdError {
+    /// Exit 1 — insufficient privileges.
+    PermissionDenied(String),
+    /// Exit 3 — an unexpected runtime failure.
+    UnexpectedFailure(String),
+    /// Exit 4 — `/etc/shadow` (or equivalent) does not exist.
+    FileMissing(String),
+    /// Exit 5 — could not acquire the shadow lock file.
+    FileBusy(String),
+    /// Exit 10 — PAM returned an error.
+    #[cfg_attr(not(feature = "pam"), allow(dead_code))]
+    PamError(String),
+    /// Sentinel used when the error has already been printed (e.g. by clap).
+    /// The uucore wrapper skips printing when Display yields an empty string.
+    AlreadyPrinted(i32),
+}
+
+impl fmt::Display for PasswdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PermissionDenied(msg)
+            | Self::UnexpectedFailure(msg)
+            | Self::FileMissing(msg)
+            | Self::FileBusy(msg)
+            | Self::PamError(msg) => f.write_str(msg),
+            Self::AlreadyPrinted(_) => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for PasswdError {}
+
+impl UError for PasswdError {
+    fn code(&self) -> i32 {
+        match self {
+            Self::PermissionDenied(_) => 1,
+            Self::UnexpectedFailure(_) => 3,
+            Self::FileMissing(_) => 4,
+            Self::FileBusy(_) => 5,
+            Self::PamError(_) => 10,
+            Self::AlreadyPrinted(code) => *code,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Entry point for the `passwd` utility.
+#[uucore::main]
+#[allow(clippy::too_many_lines)]
+pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
         Err(e) => {
             e.print().ok();
             if !e.use_stderr() {
-                // --help: clap prints to stdout, exit 0.
-                return exit_codes::SUCCESS;
+                // --help / --version: clap prints to stdout, exit 0.
+                return Ok(());
             }
             // GNU passwd exits 2 for conflicting options, 6 for unknown/invalid.
-            return match e.kind() {
+            return Err(match e.kind() {
                 clap::error::ErrorKind::ArgumentConflict
-                | clap::error::ErrorKind::MissingRequiredArgument => exit_codes::INVALID_OPTIONS,
-                _ => exit_codes::INVALID_ARGUMENT,
-            };
+                | clap::error::ErrorKind::MissingRequiredArgument => {
+                    PasswdError::AlreadyPrinted(2).into()
+                }
+                _ => PasswdError::AlreadyPrinted(6).into(),
+            });
         }
     };
 
     // Handle --root / -R: chroot before anything else.
     if let Some(chroot_dir) = matches.get_one::<String>(options::ROOT) {
-        if let Err(code) = do_chroot(chroot_dir) {
-            return code;
-        }
+        do_chroot(chroot_dir)?;
     }
 
     let prefix = matches.get_one::<String>(options::PREFIX).map(Path::new);
@@ -83,10 +145,7 @@ pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
     let quiet = matches.get_flag(options::QUIET);
 
     // Determine target user.
-    let target_user = match resolve_target_user(&matches) {
-        Ok(u) => u,
-        Err(code) => return code,
-    };
+    let target_user = resolve_target_user(&matches)?;
 
     // Dispatch to the appropriate operation.
     if matches.get_flag(options::STATUS) {
@@ -95,16 +154,11 @@ pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
         // Non-root users can only view their own status.
         if !is_root() {
             if show_all {
-                eprintln!("passwd: Permission denied.");
-                return exit_codes::PERMISSION_DENIED;
+                return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
             }
-            let current_user = match get_current_username() {
-                Ok(u) => u,
-                Err(code) => return code,
-            };
+            let current_user = get_current_username()?;
             if current_user != target_user {
-                eprintln!("passwd: Permission denied.");
-                return exit_codes::PERMISSION_DENIED;
+                return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
             }
         }
 
@@ -113,8 +167,7 @@ pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
 
     // All remaining operations require root (euid 0).
     if !is_root() {
-        eprintln!("passwd: Permission denied.");
-        return exit_codes::PERMISSION_DENIED;
+        return Err(PasswdError::PermissionDenied("Permission denied.".into()).into());
     }
 
     // Determine the mutation operation (if any).
@@ -329,16 +382,15 @@ pub fn uu_app() -> Command {
 // ---------------------------------------------------------------------------
 
 /// `passwd -S [user]` / `passwd -Sa` — display account status.
-fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> i32 {
+fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> UResult<()> {
     let shadow_path = root.shadow_path();
     let entries = match shadow::read_shadow_file(&shadow_path) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("passwd: {e}");
             return if shadow_path.exists() {
-                exit_codes::UNEXPECTED_FAILURE
+                Err(PasswdError::UnexpectedFailure(e.to_string()).into())
             } else {
-                exit_codes::PASSWD_FILE_MISSING
+                Err(PasswdError::FileMissing(e.to_string()).into())
             };
         }
     };
@@ -346,11 +398,11 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> i32 {
     match target_user {
         Some(user) => {
             let Some(entry) = entries.iter().find(|e| e.name == user) else {
-                eprintln!(
-                    "passwd: user '{user}' does not exist in {}",
+                return Err(PasswdError::UnexpectedFailure(format!(
+                    "user '{user}' does not exist in {}",
                     shadow_path.display()
-                );
-                return exit_codes::UNEXPECTED_FAILURE;
+                ))
+                .into());
             };
             println!("{}", format_status(entry));
         }
@@ -362,13 +414,13 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> i32 {
         }
     }
 
-    exit_codes::SUCCESS
+    Ok(())
 }
 
 /// Default operation: change password via PAM.
 ///
 /// Feature-gated on `pam`. When PAM is not compiled in, prints an error.
-fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> i32 {
+fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()> {
     let _keep_tokens = matches.get_flag(options::KEEP_TOKENS);
     let _use_stdin = matches.get_flag(options::STDIN);
     let _repository = matches.get_one::<String>(options::REPOSITORY);
@@ -386,23 +438,20 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> i32 {
         let mut pam = match PamContext::new("passwd", _target_user, conv_mode) {
             Ok(ctx) => ctx,
             Err(e) => {
-                eprintln!("passwd: {e}");
-                return exit_codes::PAM_ERROR;
+                return Err(PasswdError::PamError(e.to_string()).into());
             }
         };
 
         // Non-root users changing their own password must authenticate first.
         if !is_root() {
             if let Err(e) = pam.authenticate(0) {
-                eprintln!("passwd: {e}");
-                return exit_codes::PAM_ERROR;
+                return Err(PasswdError::PamError(e.to_string()).into());
             }
         }
 
         // Validate that the account is in good standing.
         if let Err(e) = pam.acct_mgmt(0) {
-            eprintln!("passwd: {e}");
-            return exit_codes::PAM_ERROR;
+            return Err(PasswdError::PamError(e.to_string()).into());
         }
 
         // Change the password token.
@@ -413,17 +462,18 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> i32 {
         };
 
         if let Err(e) = pam.chauthtok(chauthtok_flags) {
-            eprintln!("passwd: {e}");
-            return exit_codes::PAM_ERROR;
+            return Err(PasswdError::PamError(e.to_string()).into());
         }
 
-        exit_codes::SUCCESS
+        Ok(())
     }
 
     #[cfg(not(feature = "pam"))]
     {
-        eprintln!("passwd: PAM support is not compiled in — cannot change password interactively");
-        exit_codes::UNEXPECTED_FAILURE
+        Err(PasswdError::UnexpectedFailure(
+            "PAM support is not compiled in \u{2014} cannot change password interactively".into(),
+        )
+        .into())
     }
 }
 
@@ -432,7 +482,7 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Resolve the target username from args or current user.
-fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, i32> {
+fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, PasswdError> {
     if let Some(user) = matches.get_one::<String>(options::USER) {
         return Ok(user.clone());
     }
@@ -441,14 +491,12 @@ fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, i32> {
     let uid = nix::unistd::getuid();
     match nix::unistd::User::from_uid(uid) {
         Ok(Some(user)) => Ok(user.name),
-        Ok(None) => {
-            eprintln!("passwd: cannot determine current username for uid {uid}");
-            Err(exit_codes::UNEXPECTED_FAILURE)
-        }
-        Err(e) => {
-            eprintln!("passwd: cannot determine current username: {e}");
-            Err(exit_codes::UNEXPECTED_FAILURE)
-        }
+        Ok(None) => Err(PasswdError::UnexpectedFailure(format!(
+            "cannot determine current username for uid {uid}"
+        ))),
+        Err(e) => Err(PasswdError::UnexpectedFailure(format!(
+            "cannot determine current username: {e}"
+        ))),
     }
 }
 
@@ -458,18 +506,16 @@ fn is_root() -> bool {
 }
 
 /// Return the current user's username (from euid).
-fn get_current_username() -> Result<String, i32> {
+fn get_current_username() -> Result<String, PasswdError> {
     let uid = nix::unistd::geteuid();
     match nix::unistd::User::from_uid(uid) {
         Ok(Some(user)) => Ok(user.name),
-        Ok(None) => {
-            eprintln!("passwd: cannot determine current username for uid {uid}");
-            Err(exit_codes::UNEXPECTED_FAILURE)
-        }
-        Err(e) => {
-            eprintln!("passwd: cannot determine current username: {e}");
-            Err(exit_codes::UNEXPECTED_FAILURE)
-        }
+        Ok(None) => Err(PasswdError::UnexpectedFailure(format!(
+            "cannot determine current username for uid {uid}"
+        ))),
+        Err(e) => Err(PasswdError::UnexpectedFailure(format!(
+            "cannot determine current username: {e}"
+        ))),
     }
 }
 
@@ -477,21 +523,19 @@ fn get_current_username() -> Result<String, i32> {
 ///
 /// Must be root to call `chroot`. After `chroot`, chdir to `/` so the
 /// working directory is valid inside the new root.
-fn do_chroot(dir: &str) -> Result<(), i32> {
+fn do_chroot(dir: &str) -> Result<(), PasswdError> {
     if !is_root() {
-        eprintln!("passwd: only root may use --root");
-        return Err(exit_codes::PERMISSION_DENIED);
+        return Err(PasswdError::PermissionDenied(
+            "only root may use --root".into(),
+        ));
     }
 
     let path = std::path::Path::new(dir);
-    nix::unistd::chroot(path).map_err(|e| {
-        eprintln!("passwd: cannot chroot to '{dir}': {e}");
-        exit_codes::UNEXPECTED_FAILURE
-    })?;
+    nix::unistd::chroot(path)
+        .map_err(|e| PasswdError::UnexpectedFailure(format!("cannot chroot to '{dir}': {e}")))?;
 
     nix::unistd::chdir("/").map_err(|e| {
-        eprintln!("passwd: cannot chdir to / after chroot: {e}");
-        exit_codes::UNEXPECTED_FAILURE
+        PasswdError::UnexpectedFailure(format!("cannot chdir to / after chroot: {e}"))
     })?;
 
     Ok(())
@@ -546,50 +590,53 @@ fn format_days_since_epoch(days: i64) -> String {
 
 /// Lock the shadow file, read entries, apply a mutation to one user's entry,
 /// write back atomically, invalidate nscd cache.
-fn mutate_shadow<F>(root: &SysRoot, username: &str, action: &str, quiet: bool, mutate: F) -> i32
+fn mutate_shadow<F>(
+    root: &SysRoot,
+    username: &str,
+    action: &str,
+    quiet: bool,
+    mutate: F,
+) -> UResult<()>
 where
     F: FnOnce(&mut ShadowEntry) -> Result<(), String>,
 {
     let shadow_path = root.shadow_path();
 
     // Acquire lock.
-    let Ok(lock) = FileLock::acquire(&shadow_path) else {
-        eprintln!(
-            "passwd: cannot lock {}: try again later",
+    let lock = FileLock::acquire(&shadow_path).map_err(|_| {
+        PasswdError::FileBusy(format!(
+            "cannot lock {}: try again later",
             shadow_path.display()
-        );
-        return exit_codes::FILE_BUSY;
-    };
+        ))
+    })?;
 
     // Read current entries.
     let mut entries = match shadow::read_shadow_file(&shadow_path) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("passwd: {e}");
             drop(lock);
             return if shadow_path.exists() {
-                exit_codes::UNEXPECTED_FAILURE
+                Err(PasswdError::UnexpectedFailure(e.to_string()).into())
             } else {
-                exit_codes::PASSWD_FILE_MISSING
+                Err(PasswdError::FileMissing(e.to_string()).into())
             };
         }
     };
 
     // Find the target user.
     let Some(entry) = entries.iter_mut().find(|e| e.name == username) else {
-        eprintln!(
-            "passwd: user '{username}' does not exist in {}",
-            shadow_path.display()
-        );
         drop(lock);
-        return exit_codes::UNEXPECTED_FAILURE;
+        return Err(PasswdError::UnexpectedFailure(format!(
+            "user '{username}' does not exist in {}",
+            shadow_path.display()
+        ))
+        .into());
     };
 
     // Apply the mutation.
     if let Err(msg) = mutate(entry) {
-        eprintln!("passwd: {msg}");
         drop(lock);
-        return exit_codes::UNEXPECTED_FAILURE;
+        return Err(PasswdError::UnexpectedFailure(msg).into());
     }
 
     // Write back atomically.
@@ -599,9 +646,12 @@ where
     });
 
     if let Err(e) = write_result {
-        eprintln!("passwd: failed to write {}: {e}", shadow_path.display());
         drop(lock);
-        return exit_codes::UNEXPECTED_FAILURE;
+        return Err(PasswdError::UnexpectedFailure(format!(
+            "failed to write {}: {e}",
+            shadow_path.display()
+        ))
+        .into());
     }
 
     // Release lock and invalidate caches.
@@ -609,9 +659,9 @@ where
     nscd::invalidate_cache("shadow");
 
     if !quiet {
-        eprintln!("passwd: {action} for user {username}");
+        uucore::show_error!("{action} for user {username}");
     }
-    exit_codes::SUCCESS
+    Ok(())
 }
 
 #[cfg(test)]
@@ -801,7 +851,7 @@ mod tests {
     fn test_stdin_flag_parses() {
         let result = uu_app().try_get_matches_from(["passwd", "-s", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert!(m.get_flag(options::STDIN));
     }
 
@@ -809,7 +859,7 @@ mod tests {
     fn test_keep_tokens_flag_parses() {
         let result = uu_app().try_get_matches_from(["passwd", "-k", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert!(m.get_flag(options::KEEP_TOKENS));
     }
 
@@ -817,7 +867,7 @@ mod tests {
     fn test_root_flag_parses() {
         let result = uu_app().try_get_matches_from(["passwd", "-R", "/mnt/sysroot", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert_eq!(
             m.get_one::<String>(options::ROOT).map(String::as_str),
             Some("/mnt/sysroot")
@@ -828,7 +878,7 @@ mod tests {
     fn test_quiet_flag_parses() {
         let result = uu_app().try_get_matches_from(["passwd", "-q", "-l", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert!(m.get_flag(options::QUIET));
     }
 
@@ -836,7 +886,7 @@ mod tests {
     fn test_repository_flag_parses() {
         let result = uu_app().try_get_matches_from(["passwd", "-r", "files", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert_eq!(
             m.get_one::<String>(options::REPOSITORY).map(String::as_str),
             Some("files")
@@ -871,7 +921,7 @@ mod tests {
     fn test_aging_combined_flags() {
         let result = uu_app().try_get_matches_from(["passwd", "-n", "5", "-x", "90", "user"]);
         assert!(result.is_ok());
-        let m = result.unwrap();
+        let m = result.expect("already checked Ok");
         assert_eq!(m.get_one::<i64>(options::MINDAYS).copied(), Some(5));
         assert_eq!(m.get_one::<i64>(options::MAXDAYS).copied(), Some(90));
     }
@@ -891,27 +941,27 @@ mod tests {
 
     /// Helper to create a temp dir with an etc/shadow file.
     fn setup_prefix(shadow_content: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
         let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
-        std::fs::write(etc.join("shadow"), shadow_content).unwrap();
+        std::fs::create_dir_all(&etc).expect("failed to create etc dir");
+        std::fs::write(etc.join("shadow"), shadow_content).expect("failed to write shadow file");
         dir
     }
 
     /// Read the shadow file content back from a prefix dir.
     fn read_shadow(dir: &tempfile::TempDir) -> String {
-        std::fs::read_to_string(dir.path().join("etc/shadow")).unwrap()
+        std::fs::read_to_string(dir.path().join("etc/shadow")).expect("failed to read shadow file")
     }
 
-    /// Run uumain with the given args.
+    /// Run uumain with the given args, returning the exit code.
     fn run(args: &[&str]) -> i32 {
         let os_args: Vec<std::ffi::OsString> = args.iter().map(|s| (*s).into()).collect();
-        uumain(os_args)
+        uumain(os_args.into_iter())
     }
 
     /// Run uumain with a prefix dir prepended to the args.
     fn run_with_prefix(dir: &tempfile::TempDir, extra_args: &[&str]) -> i32 {
-        let prefix_str = dir.path().to_str().unwrap();
+        let prefix_str = dir.path().to_str().expect("non-UTF-8 temp path");
         let mut args = vec!["passwd", "-P", prefix_str];
         args.extend_from_slice(extra_args);
         run(&args)
@@ -1141,10 +1191,10 @@ mod tests {
         if skip_unless_root() {
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
         // No etc/shadow — should return PASSWD_FILE_MISSING (4).
         let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::create_dir_all(&etc).expect("failed to create etc dir");
         // Shadow file does not exist.
         let code = run_with_prefix(&dir, &["-S", "testuser"]);
         assert_eq!(code, exit_codes::PASSWD_FILE_MISSING);
@@ -1180,7 +1230,10 @@ mod tests {
         // Check status shows L — we verify by reading the shadow file and
         // checking the format_status output on the resulting entry.
         let content = read_shadow(&dir);
-        let entry: ShadowEntry = content.trim().parse().unwrap();
+        let entry: ShadowEntry = content
+            .trim()
+            .parse()
+            .expect("failed to parse shadow entry");
         assert_eq!(entry.status_char(), "L");
     }
 
@@ -1193,22 +1246,34 @@ mod tests {
 
         // Lock.
         assert_eq!(run_with_prefix(&dir, &["-l", "testuser"]), 0);
-        let entry: ShadowEntry = read_shadow(&dir).trim().parse().unwrap();
+        let entry: ShadowEntry = read_shadow(&dir)
+            .trim()
+            .parse()
+            .expect("failed to parse shadow entry");
         assert_eq!(entry.status_char(), "L", "after lock");
 
         // Unlock.
         assert_eq!(run_with_prefix(&dir, &["-u", "testuser"]), 0);
-        let entry: ShadowEntry = read_shadow(&dir).trim().parse().unwrap();
+        let entry: ShadowEntry = read_shadow(&dir)
+            .trim()
+            .parse()
+            .expect("failed to parse shadow entry");
         assert_eq!(entry.status_char(), "P", "after unlock");
 
         // Delete.
         assert_eq!(run_with_prefix(&dir, &["-d", "testuser"]), 0);
-        let entry: ShadowEntry = read_shadow(&dir).trim().parse().unwrap();
+        let entry: ShadowEntry = read_shadow(&dir)
+            .trim()
+            .parse()
+            .expect("failed to parse shadow entry");
         assert_eq!(entry.status_char(), "NP", "after delete");
 
         // Expire.
         assert_eq!(run_with_prefix(&dir, &["-e", "testuser"]), 0);
-        let entry: ShadowEntry = read_shadow(&dir).trim().parse().unwrap();
+        let entry: ShadowEntry = read_shadow(&dir)
+            .trim()
+            .parse()
+            .expect("failed to parse shadow entry");
         assert_eq!(entry.last_change, Some(0), "after expire");
     }
 

@@ -31,6 +31,9 @@ shadow-core = { path = "src/shadow-core" }
 # CLI
 clap = { version = "4", features = ["derive", "wrap_help"] }
 
+# uutils integration
+uucore = "0.7"
+
 # Error handling
 thiserror = "2"
 
