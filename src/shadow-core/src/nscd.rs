@@ -19,8 +19,11 @@ use std::process::Command;
 /// Silently succeeds if `nscd`/`sssd` is not installed or not running —
 /// this matches GNU shadow-utils behavior.
 pub fn invalidate_cache(database: &str) {
-    // nscd -i <database>
-    let _ = Command::new("nscd").arg("-i").arg(database).status();
+    // Use absolute paths to avoid PATH-based lookups in setuid context.
+    let _ = Command::new("/usr/sbin/nscd")
+        .arg("-i")
+        .arg(database)
+        .status();
 
     // sssd: sss_cache with the appropriate flag
     let flag = match database {
@@ -28,5 +31,5 @@ pub fn invalidate_cache(database: &str) {
         "group" => "-G",
         _ => return,
     };
-    let _ = Command::new("sss_cache").arg(flag).status();
+    let _ = Command::new("/usr/sbin/sss_cache").arg(flag).status();
 }

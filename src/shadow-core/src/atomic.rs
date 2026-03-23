@@ -13,6 +13,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -37,16 +38,18 @@ where
 
     let tmp_path = tmp_path_for(target);
 
-    let mut tmp_file =
-        File::create(&tmp_path).map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
+    // Determine permissions: preserve original if target exists, otherwise 0600.
+    // Set mode at creation time to avoid any window where the file is world-readable.
+    let mode = fs::metadata(target)
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()))
+        .unwrap_or(0o600);
 
-    // Preserve original file permissions if the target exists.
-    if let Ok(meta) = fs::metadata(target) {
-        let permissions = meta.permissions();
-        tmp_file
-            .set_permissions(permissions)
-            .map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
-    }
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp_path)
+        .map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
 
     let result = f(&mut tmp_file);
 

@@ -54,29 +54,50 @@ impl FromStr for PasswdEntry {
     type Err = ShadowError;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() != 7 {
-            return Err(ShadowError::Parse(format!(
-                "expected 7 colon-separated fields, got {}",
-                fields.len()
-            )));
+        // Use splitn(8) to detect extra fields without allocating a Vec.
+        let mut fields = line.splitn(8, ':');
+
+        let name = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing name".into()))?;
+        let passwd = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing passwd".into()))?;
+        let uid_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing uid".into()))?;
+        let gid_str = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing gid".into()))?;
+        let gecos = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing gecos".into()))?;
+        let home = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing home".into()))?;
+        let shell = fields
+            .next()
+            .ok_or_else(|| ShadowError::Parse("missing shell".into()))?;
+
+        if fields.next().is_some() {
+            return Err(ShadowError::Parse("too many fields".into()));
         }
 
-        let uid = fields[2]
+        let uid = uid_str
             .parse::<u32>()
-            .map_err(|e| ShadowError::Parse(format!("invalid UID '{}': {e}", fields[2])))?;
-        let gid = fields[3]
+            .map_err(|e| ShadowError::Parse(format!("invalid UID '{uid_str}': {e}")))?;
+        let gid = gid_str
             .parse::<u32>()
-            .map_err(|e| ShadowError::Parse(format!("invalid GID '{}': {e}", fields[3])))?;
+            .map_err(|e| ShadowError::Parse(format!("invalid GID '{gid_str}': {e}")))?;
 
         Ok(Self {
-            name: fields[0].to_string(),
-            passwd: fields[1].to_string(),
+            name: name.to_string(),
+            passwd: passwd.to_string(),
             uid,
             gid,
-            gecos: fields[4].to_string(),
-            home: fields[5].to_string(),
-            shell: fields[6].to_string(),
+            gecos: gecos.to_string(),
+            home: home.to_string(),
+            shell: shell.to_string(),
         })
     }
 }
