@@ -44,11 +44,13 @@ mod exit_codes {
     pub const UNEXPECTED_FAILURE: i32 = 3;
     pub const PASSWD_FILE_MISSING: i32 = 4;
     pub const FILE_BUSY: i32 = 5;
-    #[allow(dead_code)]
     pub const INVALID_ARGUMENT: i32 = 6;
+    #[cfg_attr(not(feature = "pam"), allow(dead_code))]
+    pub const PAM_ERROR: i32 = 10;
 }
 
 /// Entry point for the `passwd` utility.
+#[allow(clippy::too_many_lines)]
 pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
     let matches = uu_app().try_get_matches_from(args);
 
@@ -89,36 +91,91 @@ pub fn uumain(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
     // Dispatch to the appropriate operation.
     if matches.get_flag(options::STATUS) {
         let show_all = matches.get_flag(options::ALL);
+
+        // Non-root users can only view their own status.
+        if !is_root() {
+            if show_all {
+                eprintln!("passwd: Permission denied.");
+                return exit_codes::PERMISSION_DENIED;
+            }
+            let current_user = match get_current_username() {
+                Ok(u) => u,
+                Err(code) => return code,
+            };
+            if current_user != target_user {
+                eprintln!("passwd: Permission denied.");
+                return exit_codes::PERMISSION_DENIED;
+            }
+        }
+
         return cmd_status(&root, if show_all { None } else { Some(&target_user) });
     }
 
     // All remaining operations require root (euid 0).
-    if !is_root() && prefix.is_none() {
+    if !is_root() {
         eprintln!("passwd: Permission denied.");
         return exit_codes::PERMISSION_DENIED;
     }
 
-    if matches.get_flag(options::LOCK) {
-        return cmd_lock(&root, &target_user, quiet);
-    }
-    if matches.get_flag(options::UNLOCK) {
-        return cmd_unlock(&root, &target_user, quiet);
-    }
-    if matches.get_flag(options::DELETE) {
-        return cmd_delete(&root, &target_user, quiet);
-    }
-    if matches.get_flag(options::EXPIRE) {
-        return cmd_expire(&root, &target_user, quiet);
-    }
+    // Determine the mutation operation (if any).
+    let has_lock = matches.get_flag(options::LOCK);
+    let has_unlock = matches.get_flag(options::UNLOCK);
+    let has_delete = matches.get_flag(options::DELETE);
+    let has_expire = matches.get_flag(options::EXPIRE);
+    let has_mutation = has_lock || has_unlock || has_delete || has_expire;
 
-    // Aging field updates.
-    let has_aging = matches.contains_id(options::MINDAYS)
-        || matches.contains_id(options::MAXDAYS)
-        || matches.contains_id(options::WARNDAYS)
-        || matches.contains_id(options::INACTIVE);
+    // Collect aging flag values.
+    let min = matches.get_one::<i64>(options::MINDAYS).copied();
+    let max = matches.get_one::<i64>(options::MAXDAYS).copied();
+    let warn = matches.get_one::<i64>(options::WARNDAYS).copied();
+    let inactive = matches.get_one::<i64>(options::INACTIVE).copied();
+    let has_aging = min.is_some() || max.is_some() || warn.is_some() || inactive.is_some();
 
-    if has_aging {
-        return cmd_aging(&matches, &root, &target_user, quiet);
+    // When a mutation flag and aging flags are both present, apply both in a
+    // single `mutate_shadow` call so neither set of changes is lost.
+    if has_mutation || has_aging {
+        let action = if has_lock {
+            "Locking password"
+        } else if has_unlock {
+            "Unlocking password"
+        } else if has_delete {
+            "Removing password"
+        } else if has_expire {
+            "Expiring password"
+        } else {
+            "Updating aging information"
+        };
+
+        return mutate_shadow(&root, &target_user, action, quiet, |entry| {
+            // Apply the mutation operation.
+            if has_lock {
+                entry.lock();
+            } else if has_unlock {
+                if !entry.unlock() {
+                    return Err("cannot unlock: password is not set or would remain locked".into());
+                }
+            } else if has_delete {
+                entry.delete_password();
+            } else if has_expire {
+                entry.expire();
+            }
+
+            // Apply aging fields.
+            if let Some(v) = min {
+                entry.min_age = Some(v);
+            }
+            if let Some(v) = max {
+                entry.max_age = Some(v);
+            }
+            if let Some(v) = warn {
+                entry.warn_days = Some(v);
+            }
+            if let Some(v) = inactive {
+                entry.inactive_days = Some(v);
+            }
+
+            Ok(())
+        });
     }
 
     // Default: password change via PAM.
@@ -308,64 +365,6 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> i32 {
     exit_codes::SUCCESS
 }
 
-/// `passwd -l user` — lock the account password.
-fn cmd_lock(root: &SysRoot, user: &str, quiet: bool) -> i32 {
-    mutate_shadow(root, user, "Locking password", quiet, |entry| {
-        entry.lock();
-        Ok(())
-    })
-}
-
-/// `passwd -u user` — unlock the account password.
-fn cmd_unlock(root: &SysRoot, user: &str, quiet: bool) -> i32 {
-    mutate_shadow(root, user, "Unlocking password", quiet, |entry| {
-        if !entry.unlock() {
-            return Err("cannot unlock: password is not set or would remain locked".into());
-        }
-        Ok(())
-    })
-}
-
-/// `passwd -d user` — delete the account password.
-fn cmd_delete(root: &SysRoot, user: &str, quiet: bool) -> i32 {
-    mutate_shadow(root, user, "Removing password", quiet, |entry| {
-        entry.delete_password();
-        Ok(())
-    })
-}
-
-/// `passwd -e user` — expire the account password.
-fn cmd_expire(root: &SysRoot, user: &str, quiet: bool) -> i32 {
-    mutate_shadow(root, user, "Expiring password", quiet, |entry| {
-        entry.expire();
-        Ok(())
-    })
-}
-
-/// `passwd -n/-x/-w/-i` — update aging fields.
-fn cmd_aging(matches: &clap::ArgMatches, root: &SysRoot, user: &str, quiet: bool) -> i32 {
-    let min = matches.get_one::<i64>(options::MINDAYS).copied();
-    let max = matches.get_one::<i64>(options::MAXDAYS).copied();
-    let warn = matches.get_one::<i64>(options::WARNDAYS).copied();
-    let inactive = matches.get_one::<i64>(options::INACTIVE).copied();
-
-    mutate_shadow(root, user, "Updating aging information", quiet, |entry| {
-        if let Some(v) = min {
-            entry.min_age = Some(v);
-        }
-        if let Some(v) = max {
-            entry.max_age = Some(v);
-        }
-        if let Some(v) = warn {
-            entry.warn_days = Some(v);
-        }
-        if let Some(v) = inactive {
-            entry.inactive_days = Some(v);
-        }
-        Ok(())
-    })
-}
-
 /// Default operation: change password via PAM.
 ///
 /// Feature-gated on `pam`. When PAM is not compiled in, prints an error.
@@ -376,44 +375,46 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> i32 {
 
     #[cfg(feature = "pam")]
     {
-        use shadow_core::pam::{ConvMode, PamContext};
+        use shadow_core::pam::{flags, ConvMode, PamContext};
 
         let conv_mode = if _use_stdin {
             ConvMode::Stdin
         } else {
-            ConvMode::Terminal
+            ConvMode::Tty
         };
 
         let mut pam = match PamContext::new("passwd", _target_user, conv_mode) {
             Ok(ctx) => ctx,
             Err(e) => {
                 eprintln!("passwd: {e}");
-                return exit_codes::UNEXPECTED_FAILURE;
+                return exit_codes::PAM_ERROR;
             }
         };
-
-        if let Some(repo) = _repository {
-            pam.set_repository(repo);
-        }
 
         // Non-root users changing their own password must authenticate first.
         if !is_root() {
-            if let Err(e) = pam.authenticate() {
+            if let Err(e) = pam.authenticate(0) {
                 eprintln!("passwd: {e}");
-                return exit_codes::PERMISSION_DENIED;
+                return exit_codes::PAM_ERROR;
             }
         }
 
+        // Validate that the account is in good standing.
+        if let Err(e) = pam.acct_mgmt(0) {
+            eprintln!("passwd: {e}");
+            return exit_codes::PAM_ERROR;
+        }
+
         // Change the password token.
-        let result = if _keep_tokens {
-            pam.chauthtok_expired()
+        let chauthtok_flags = if _keep_tokens {
+            flags::PAM_CHANGE_EXPIRED_AUTHTOK
         } else {
-            pam.chauthtok()
+            0
         };
 
-        if let Err(e) = result {
+        if let Err(e) = pam.chauthtok(chauthtok_flags) {
             eprintln!("passwd: {e}");
-            return exit_codes::UNEXPECTED_FAILURE;
+            return exit_codes::PAM_ERROR;
         }
 
         exit_codes::SUCCESS
@@ -454,6 +455,22 @@ fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, i32> {
 /// Check if the effective user is root.
 fn is_root() -> bool {
     nix::unistd::geteuid().is_root()
+}
+
+/// Return the current user's username (from euid).
+fn get_current_username() -> Result<String, i32> {
+    let uid = nix::unistd::geteuid();
+    match nix::unistd::User::from_uid(uid) {
+        Ok(Some(user)) => Ok(user.name),
+        Ok(None) => {
+            eprintln!("passwd: cannot determine current username for uid {uid}");
+            Err(exit_codes::UNEXPECTED_FAILURE)
+        }
+        Err(e) => {
+            eprintln!("passwd: cannot determine current username: {e}");
+            Err(exit_codes::UNEXPECTED_FAILURE)
+        }
+    }
 }
 
 /// Perform `chroot(2)` into the specified directory.
@@ -860,8 +877,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Integration tests with --prefix (synthetic shadow files, no root needed)
+    // Integration tests with --prefix (require root — run in Docker)
     // -----------------------------------------------------------------------
+
+    /// Skip the test when not running as root (euid != 0).
+    ///
+    /// Bug #3 removed the prefix bypass for the root check, so all mutation
+    /// and cross-user status tests now require euid 0. In CI these run inside
+    /// a Docker container as root.
+    fn skip_unless_root() -> bool {
+        !nix::unistd::geteuid().is_root()
+    }
 
     /// Helper to create a temp dir with an etc/shadow file.
     fn setup_prefix(shadow_content: &str) -> tempfile::TempDir {
@@ -893,6 +919,9 @@ mod tests {
 
     #[test]
     fn test_status_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-S", "testuser"]);
         assert_eq!(code, 0);
@@ -900,6 +929,9 @@ mod tests {
 
     #[test]
     fn test_lock_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-l", "testuser"]);
         assert_eq!(code, 0);
@@ -910,6 +942,9 @@ mod tests {
 
     #[test]
     fn test_unlock_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:!$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-u", "testuser"]);
         assert_eq!(code, 0);
@@ -920,6 +955,9 @@ mod tests {
 
     #[test]
     fn test_delete_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-d", "testuser"]);
         assert_eq!(code, 0);
@@ -930,6 +968,9 @@ mod tests {
 
     #[test]
     fn test_expire_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-e", "testuser"]);
         assert_eq!(code, 0);
@@ -940,6 +981,9 @@ mod tests {
 
     #[test]
     fn test_aging_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(
             &dir,
@@ -953,6 +997,9 @@ mod tests {
 
     #[test]
     fn test_status_all_with_prefix() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("root:$6$roothash:19000:0:99999:7:::\ntestuser:!:19500::::::\n");
         let code = run_with_prefix(&dir, &["-S", "-a"]);
         assert_eq!(code, 0);
@@ -964,6 +1011,9 @@ mod tests {
 
     #[test]
     fn test_lock_already_locked() {
+        if skip_unless_root() {
+            return;
+        }
         // Locking an already locked password adds another '!'.
         let dir = setup_prefix("testuser:!$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-l", "testuser"]);
@@ -978,6 +1028,9 @@ mod tests {
 
     #[test]
     fn test_unlock_double_locked() {
+        if skip_unless_root() {
+            return;
+        }
         // Unlocking "!!$6$hash" removes one '!', leaving "!$6$hash" which
         // is still locked — so unlock should report the first '!' was removed
         // but the result starts with '!' and ShadowEntry::unlock returns true
@@ -998,6 +1051,9 @@ mod tests {
 
     #[test]
     fn test_unlock_empty_password_fails() {
+        if skip_unless_root() {
+            return;
+        }
         // Cannot unlock an account with no hash — unlock returns false.
         let dir = setup_prefix("testuser::19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-u", "testuser"]);
@@ -1006,6 +1062,9 @@ mod tests {
 
     #[test]
     fn test_delete_already_empty() {
+        if skip_unless_root() {
+            return;
+        }
         // Deleting an already-empty password is a no-op (succeeds).
         let dir = setup_prefix("testuser::19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-d", "testuser"]);
@@ -1017,6 +1076,9 @@ mod tests {
 
     #[test]
     fn test_expire_already_expired() {
+        if skip_unless_root() {
+            return;
+        }
         // Expiring an already-expired (last_change=0) account succeeds.
         let dir = setup_prefix("testuser:$6$hash:0:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-e", "testuser"]);
@@ -1028,6 +1090,9 @@ mod tests {
 
     #[test]
     fn test_multiple_users_only_target_modified() {
+        if skip_unless_root() {
+            return;
+        }
         let shadow = "alice:$6$alice:19500:0:99999:7:::\nbob:$6$bob:19500:0:99999:7:::\ncharlie:$6$charlie:19500:0:99999:7:::\n";
         let dir = setup_prefix(shadow);
 
@@ -1053,6 +1118,9 @@ mod tests {
 
     #[test]
     fn test_status_nonexistent_user() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-S", "nosuchuser"]);
         assert_ne!(code, 0);
@@ -1060,6 +1128,9 @@ mod tests {
 
     #[test]
     fn test_lock_nonexistent_user() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
         let code = run_with_prefix(&dir, &["-l", "nosuchuser"]);
         assert_ne!(code, 0);
@@ -1067,6 +1138,9 @@ mod tests {
 
     #[test]
     fn test_missing_shadow_file() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         // No etc/shadow — should return PASSWD_FILE_MISSING (4).
         let etc = dir.path().join("etc");
@@ -1078,6 +1152,9 @@ mod tests {
 
     #[test]
     fn test_quiet_suppresses_output() {
+        if skip_unless_root() {
+            return;
+        }
         // With -q, the stderr action message should be suppressed.
         // We verify that the action still succeeds.
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
@@ -1091,6 +1168,9 @@ mod tests {
 
     #[test]
     fn test_lock_then_status() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
 
         // Lock.
@@ -1106,6 +1186,9 @@ mod tests {
 
     #[test]
     fn test_full_lifecycle() {
+        if skip_unless_root() {
+            return;
+        }
         let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
 
         // Lock.
@@ -1127,5 +1210,47 @@ mod tests {
         assert_eq!(run_with_prefix(&dir, &["-e", "testuser"]), 0);
         let entry: ShadowEntry = read_shadow(&dir).trim().parse().unwrap();
         assert_eq!(entry.last_change, Some(0), "after expire");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug-fix verification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pam_exit_code_defined() {
+        assert_eq!(exit_codes::PAM_ERROR, 10);
+    }
+
+    #[test]
+    fn test_mutation_with_aging_combined() {
+        if skip_unless_root() {
+            return;
+        }
+        // Bug #4: aging flags (-n/-x/-w/-i) used alongside mutation flags
+        // (-l/-u/-d/-e) must all be applied in a single operation.
+        let dir = setup_prefix("testuser:$6$hash:19500:0:99999:7:::\n");
+        let code = run_with_prefix(
+            &dir,
+            &[
+                "-l", "-n", "10", "-x", "60", "-w", "5", "-i", "20", "testuser",
+            ],
+        );
+        assert_eq!(code, 0);
+
+        let content = read_shadow(&dir);
+        // Password should be locked AND aging fields updated.
+        assert!(
+            content.contains("testuser:!$6$hash:19500:10:60:5:20::"),
+            "expected locked password + updated aging, got: {content}"
+        );
+    }
+
+    #[test]
+    fn test_status_permission_denied_code_path() {
+        // Verify the permission-denied code path is reachable by checking
+        // that the get_current_username helper works (it will return a
+        // username for the current uid).
+        let username = get_current_username();
+        assert!(username.is_ok(), "should resolve current username");
     }
 }

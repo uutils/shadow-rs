@@ -38,6 +38,9 @@ thiserror = "2"
 nix = { version = "0.29", features = ["user", "fs", "process", "signal", "term"] }
 libc = "0.2"
 
+# Security
+zeroize = "1"
+
 # Testing
 proptest = "1"
 tempfile = "3"

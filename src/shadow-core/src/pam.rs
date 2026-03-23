@@ -28,6 +28,8 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::io::AsRawFd;
 use std::ptr;
 
+use zeroize::Zeroize;
+
 use crate::error::ShadowError;
 
 // ---------------------------------------------------------------------------
@@ -351,7 +353,13 @@ fn prompt_for_input(
     };
 
     match input {
-        Ok(line) => alloc_c_response(&line),
+        Ok(mut line) => {
+            let result = alloc_c_response(&line);
+            // Zeroize the Rust string so password data does not linger in
+            // process memory after being copied to the C-allocated response.
+            line.zeroize();
+            result
+        }
         Err(_) => Err(()),
     }
 }
