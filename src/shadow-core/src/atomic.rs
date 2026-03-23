@@ -20,6 +20,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::ShadowError;
 
+/// RAII guard that saves and restores the process umask.
+///
+/// On creation, sets the umask to zero so that file mode bits passed to
+/// `OpenOptions::mode()` are applied exactly. The original umask is restored
+/// when the guard is dropped, even on error or panic paths.
+struct UmaskGuard(nix::sys::stat::Mode);
+
+impl UmaskGuard {
+    /// Set umask to zero and return a guard that restores the original.
+    fn zero() -> Self {
+        Self(nix::sys::stat::umask(nix::sys::stat::Mode::empty()))
+    }
+}
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        nix::sys::stat::umask(self.0);
+    }
+}
+
 /// Drop guard that auto-deletes a temporary file unless explicitly committed.
 ///
 /// Ensures the tmp file is cleaned up on any error path, including panics.
@@ -75,6 +95,11 @@ where
         .unwrap_or(0o600);
 
     let mut guard = TmpGuard::new(tmp_path.clone());
+
+    // Save and reset umask to ensure mode parameter is applied exactly.
+    // A caller could set a restrictive umask before invoking setuid passwd.
+    // The guard restores the original umask on any exit path.
+    let _umask = UmaskGuard::zero();
 
     let mut tmp_file = std::fs::OpenOptions::new()
         .write(true)

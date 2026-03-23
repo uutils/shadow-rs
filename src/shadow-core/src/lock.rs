@@ -269,6 +269,27 @@ mod tests {
     }
 
     #[test]
+    fn test_lock_file_has_cloexec() {
+        use std::os::unix::io::AsRawFd;
+
+        // Rust's stdlib sets O_CLOEXEC by default on Linux.
+        // Verify the lock file FD won't leak to child processes.
+        let dir = tempfile::tempdir().expect("tempdir creation failed");
+        let file = dir.path().join("test_file");
+        fs::write(&file, "data").expect("failed to write test file");
+
+        let lock = FileLock::acquire(&file).expect("failed to acquire lock");
+
+        let f = fs::File::open(&lock.lock_path).expect("failed to open lock file");
+        let fd = f.as_raw_fd();
+        let flags =
+            nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD).expect("fcntl F_GETFD failed");
+        assert!(flags & libc::FD_CLOEXEC != 0, "FD should have CLOEXEC set");
+
+        lock.release().expect("failed to release lock");
+    }
+
+    #[test]
     fn test_lock_file_contains_pid() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test_file");

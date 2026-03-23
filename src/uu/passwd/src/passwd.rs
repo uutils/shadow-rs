@@ -326,6 +326,18 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         });
     }
 
+    // Prevent non-root from targeting other users (avoids timing-based
+    // user enumeration through PAM auth failure timing).
+    if !caller_is_root() {
+        let current = get_current_username()?;
+        if current != target_user {
+            return Err(PasswdError::PermissionDenied(
+                "You may not view or modify password information for another user.".into(),
+            )
+            .into());
+        }
+    }
+
     // Default: password change via PAM.
     cmd_pam_change(&matches, &target_user)
 }
@@ -553,10 +565,39 @@ impl Drop for PrivDrop {
     }
 }
 
+/// Install a signal handler for SIGINT that prints "Password unchanged."
+/// and exits cleanly. This matches OpenBSD's kbintr pattern.
+///
+/// Only call this during interactive password input. The handler uses
+/// async-signal-safe functions only (_exit, write).
+fn install_interrupt_handler() {
+    // SAFETY: The handler uses only async-signal-safe operations
+    // (write to fd 2, _exit). No heap allocation or mutex locking.
+    unsafe {
+        let action = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::Handler(handle_interrupt),
+            nix::sys::signal::SaFlags::empty(),
+            nix::sys::signal::SigSet::empty(),
+        );
+        let _ = nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGINT, &action);
+    }
+}
+
+extern "C" fn handle_interrupt(_sig: libc::c_int) {
+    // Async-signal-safe: only write() and _exit().
+    // SAFETY: Writing to stderr fd and exiting — both are signal-safe.
+    unsafe {
+        libc::write(2, b"\nPassword unchanged.\n".as_ptr().cast(), 21);
+        libc::_exit(0);
+    }
+}
+
 /// Default operation: change password via PAM.
 ///
 /// Feature-gated on `pam`. When PAM is not compiled in, prints an error.
 fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()> {
+    install_interrupt_handler();
+
     let _keep_tokens = matches.get_flag(options::KEEP_TOKENS);
     let _use_stdin = matches.get_flag(options::STDIN);
     let _repository = matches.get_one::<String>(options::REPOSITORY);
@@ -786,6 +827,12 @@ fn mutate_shadow<F>(
 where
     F: FnOnce(&mut ShadowEntry) -> Result<(), String>,
 {
+    // Consolidate real + effective UID to root for file operations.
+    // Some filesystem configurations check real UID.
+    if nix::unistd::geteuid().is_root() {
+        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
+    }
+
     // Block signals for the entire critical section (lock → write → unlock).
     // The RAII guard restores the original signal mask when this function returns.
     let _signals = SignalBlocker::block_critical()?;
