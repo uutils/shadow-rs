@@ -118,14 +118,14 @@ impl UError for PasswdError {
 /// PATH to a safe default. Prevents environment variable injection
 /// attacks when running as setuid-root (e.g. `LD_PRELOAD`, IFS, CDPATH).
 fn sanitize_env() {
-    const KEEP: &[&str] = &["TERM", "LANG", "LC_ALL", "LC_MESSAGES", "LC_CTYPE"];
-    let saved: Vec<(String, String)> = KEEP
-        .iter()
-        .filter_map(|&k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+    // Save variables we want to keep: TERM, LANG, and all LC_* locale vars.
+    let saved: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
         .collect();
 
-    // Clear everything.
-    for (key, _) in std::env::vars_os() {
+    // Collect all keys first to avoid modifying the env during iteration.
+    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+    for key in keys {
         std::env::remove_var(&key);
     }
 
@@ -145,8 +145,8 @@ fn sanitize_env() {
 /// Restrict filesystem access using landlock (Linux 5.13+).
 ///
 /// Best-effort: silently does nothing on kernels that don't support landlock.
+#[allow(unused_variables)]
 fn apply_landlock(root: &SysRoot) {
-    // Only attempt on Linux — landlock is Linux-specific.
     #[cfg(target_os = "linux")]
     apply_landlock_inner(root);
 }
@@ -509,7 +509,14 @@ impl PrivDrop {
 
 impl Drop for PrivDrop {
     fn drop(&mut self) {
-        let _ = nix::unistd::seteuid(self.original_euid);
+        if let Err(e) = nix::unistd::seteuid(self.original_euid) {
+            // Failing to restore privileges is a critical error — log it loudly.
+            // We can't return an error from Drop, so at least make it visible.
+            eprintln!(
+                "passwd: CRITICAL: failed to restore euid to {}: {e}",
+                self.original_euid
+            );
+        }
     }
 }
 
@@ -1434,6 +1441,40 @@ mod tests {
     #[test]
     fn test_pam_exit_code_defined() {
         assert_eq!(exit_codes::PAM_ERROR, 10);
+    }
+
+    #[test]
+    fn test_sanitize_env() {
+        // Set some dangerous vars.
+        std::env::set_var("LD_PRELOAD", "/tmp/evil.so");
+        std::env::set_var("IFS", "\t");
+        std::env::set_var("TERM", "xterm-256color");
+        std::env::set_var("LC_TIME", "en_US.UTF-8");
+
+        sanitize_env();
+
+        // Dangerous vars must be gone.
+        assert!(
+            std::env::var("LD_PRELOAD").is_err(),
+            "LD_PRELOAD should be cleared"
+        );
+        assert!(std::env::var("IFS").is_err(), "IFS should be cleared");
+
+        // Safe vars preserved.
+        assert_eq!(
+            std::env::var("TERM").ok().as_deref(),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            std::env::var("LC_TIME").ok().as_deref(),
+            Some("en_US.UTF-8")
+        );
+
+        // PATH set to safe default.
+        assert_eq!(
+            std::env::var("PATH").ok().as_deref(),
+            Some("/usr/bin:/bin:/usr/sbin:/sbin")
+        );
     }
 
     #[test]
