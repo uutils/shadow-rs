@@ -16,6 +16,11 @@ members = [
     "src/shadow-core",
     "src/uu/passwd",
     "src/uu/pwck",
+    "src/uu/useradd",
+    "src/uu/userdel",
+    "src/uu/usermod",
+    "src/uu/chpasswd",
+    "src/uu/chage",
 ]
 
 [workspace.package]
@@ -53,16 +58,28 @@ tempfile = "3"
 # Tool crates (optional, enabled by features)
 passwd = { optional = true, version = "0.0.1", package = "uu_passwd", path = "src/uu/passwd" }
 pwck = { optional = true, version = "0.0.1", package = "uu_pwck", path = "src/uu/pwck" }
+useradd = { optional = true, version = "0.0.1", package = "uu_useradd", path = "src/uu/useradd" }
+userdel = { optional = true, version = "0.0.1", package = "uu_userdel", path = "src/uu/userdel" }
+usermod = { optional = true, version = "0.0.1", package = "uu_usermod", path = "src/uu/usermod" }
+chpasswd = { optional = true, version = "0.0.1", package = "uu_chpasswd", path = "src/uu/chpasswd" }
+chage = { optional = true, version = "0.0.1", package = "uu_chage", path = "src/uu/chage" }
 
 [features]
-default = ["passwd", "pwck"]
+default = ["passwd", "pwck", "useradd", "userdel", "usermod", "chpasswd", "chage"]
 
 # Individual tools
 feat_passwd = ["passwd"]
 feat_pwck = ["pwck"]
+feat_useradd = ["useradd"]
+feat_userdel = ["userdel"]
+feat_usermod = ["usermod"]
+feat_chpasswd = ["chpasswd"]
+feat_chage = ["chage"]
 
-# Grouped features (add tools as implemented)
-feat_common = ["feat_passwd", "feat_pwck"]
+# Grouped features
+feat_phase1 = ["feat_passwd", "feat_pwck"]
+feat_phase2 = ["feat_useradd", "feat_userdel", "feat_usermod", "feat_chpasswd", "feat_chage"]
+feat_common = ["feat_phase1", "feat_phase2"]
 
 [[bin]]
 name = "shadow-rs"

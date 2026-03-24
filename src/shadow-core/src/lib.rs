@@ -36,5 +36,8 @@ pub mod selinux;
 pub mod atomic;
 pub mod lock;
 pub mod nscd;
+pub mod skel;
 pub mod sysroot;
+
+#[cfg(all(feature = "group", feature = "login-defs"))]
 pub mod uid_alloc;
