@@ -1,0 +1,371 @@
+// This file is part of the shadow-rs package.
+//
+// For the full copyright and license information, please view the LICENSE
+// file that was distributed with this source code.
+// spell-checker:ignore usermod gecos gshadow
+
+//! Integration tests for the `usermod` utility.
+//!
+//! Tests that require root are guarded by `skip_unless_root()` and run inside
+//! Docker CI containers. Non-root tests exercise clap parsing and error paths
+//! that do not need privilege.
+
+use std::ffi::OsString;
+
+/// Skip the test when not running as root (euid != 0).
+fn skip_unless_root() -> bool {
+    !nix::unistd::geteuid().is_root()
+}
+
+/// Run `uumain` with the given args, returning the exit code.
+fn run(args: &[&str]) -> i32 {
+    let os_args: Vec<OsString> = args.iter().map(|s| (*s).into()).collect();
+    usermod::uumain(os_args.into_iter())
+}
+
+/// Helper to create a temp dir with `etc/passwd`, `etc/shadow`, `etc/group`,
+/// `etc/gshadow`, and `etc/login.defs`.
+fn setup_prefix(
+    passwd_content: &str,
+    shadow_content: &str,
+    group_content: &str,
+) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let etc = dir.path().join("etc");
+    std::fs::create_dir_all(&etc).expect("failed to create etc dir");
+    std::fs::write(etc.join("passwd"), passwd_content).expect("failed to write passwd file");
+    std::fs::write(etc.join("shadow"), shadow_content).expect("failed to write shadow file");
+    std::fs::write(etc.join("group"), group_content).expect("failed to write group file");
+    std::fs::write(etc.join("gshadow"), "").expect("failed to write gshadow file");
+    std::fs::write(etc.join("login.defs"), "").expect("failed to write login.defs file");
+    dir
+}
+
+/// Read the passwd file content back from a prefix dir.
+fn read_passwd(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join("etc/passwd")).expect("failed to read passwd file")
+}
+
+/// Read the shadow file content back from a prefix dir.
+fn read_shadow(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join("etc/shadow")).expect("failed to read shadow file")
+}
+
+/// Read the group file content back from a prefix dir.
+fn read_group(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join("etc/group")).expect("failed to read group file")
+}
+
+/// Run `uumain` with a `--prefix` dir prepended to the args.
+fn run_with_prefix(dir: &tempfile::TempDir, extra_args: &[&str]) -> i32 {
+    let prefix_str = dir.path().to_str().expect("non-UTF-8 temp path");
+    let mut args = vec!["usermod", "-P", prefix_str];
+    args.extend_from_slice(extra_args);
+    run(&args)
+}
+
+// ---------------------------------------------------------------------------
+// Non-root tests -- exercise clap parsing and error paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_help_exits_zero() {
+    let code = run(&["usermod", "--help"]);
+    assert_eq!(code, 0, "--help should exit 0");
+}
+
+#[test]
+fn test_unknown_flag_exits_error() {
+    let code = run(&["usermod", "--bogus", "someuser"]);
+    assert_eq!(code, 2, "unknown flag should exit 2");
+}
+
+#[test]
+fn test_missing_login_exits_error() {
+    let code = run(&["usermod"]);
+    assert_eq!(code, 2, "missing LOGIN should exit 2");
+}
+
+#[test]
+fn test_lock_unlock_conflict() {
+    // -L and -U conflict; clap reports ArgumentConflict which maps to exit 2.
+    let code = run(&["usermod", "-L", "-U", "someuser"]);
+    assert_eq!(code, 2, "conflicting -L -U flags should exit 2");
+}
+
+// ---------------------------------------------------------------------------
+// Root-only tests -- exercise real operations via --prefix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_change_shell() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test User:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-s", "/bin/zsh", "testuser"]);
+    assert_eq!(code, 0, "changing shell should succeed");
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains(":/bin/zsh"),
+        "shell should be /bin/zsh, got: {content}"
+    );
+    // Verify the rest of the entry is intact.
+    assert!(
+        content.contains("testuser:x:1000:1000:Test User:/home/testuser:/bin/zsh"),
+        "full passwd entry should be correct, got: {content}"
+    );
+}
+
+#[test]
+fn test_change_comment() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Old Name:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-c", "New Name", "testuser"]);
+    assert_eq!(code, 0, "changing GECOS comment should succeed");
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains(":New Name:"),
+        "GECOS should be 'New Name', got: {content}"
+    );
+}
+
+#[test]
+fn test_change_home() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-d", "/new/home", "testuser"]);
+    assert_eq!(code, 0, "changing home directory should succeed");
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains(":/new/home:"),
+        "home should be /new/home, got: {content}"
+    );
+}
+
+#[test]
+fn test_change_uid() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-u", "9999", "testuser"]);
+    assert_eq!(code, 0, "changing UID should succeed");
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains("testuser:x:9999:"),
+        "UID should be 9999, got: {content}"
+    );
+}
+
+#[test]
+fn test_add_to_groups() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\ngroup1:x:2001:\ngroup2:x:2002:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-G", "group1,group2", "testuser"]);
+    assert_eq!(code, 0, "adding to supplementary groups should succeed");
+
+    let content = read_group(&dir);
+    assert!(
+        content.contains("group1:x:2001:testuser"),
+        "testuser should be in group1, got: {content}"
+    );
+    assert!(
+        content.contains("group2:x:2002:testuser"),
+        "testuser should be in group2, got: {content}"
+    );
+}
+
+#[test]
+fn test_lock_user() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-L", "testuser"]);
+    assert_eq!(code, 0, "locking user should succeed");
+
+    let content = read_shadow(&dir);
+    assert!(
+        content.contains("testuser:!$6$hash:"),
+        "after lock, expected '!' prefix on password, got: {content}"
+    );
+}
+
+#[test]
+fn test_unlock_user() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:!$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-U", "testuser"]);
+    assert_eq!(code, 0, "unlocking user should succeed");
+
+    let content = read_shadow(&dir);
+    assert!(
+        content.contains("testuser:$6$hash:"),
+        "after unlock, expected no '!' prefix, got: {content}"
+    );
+}
+
+#[test]
+fn test_nonexistent_user_fails() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Test:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-s", "/bin/zsh", "nosuchuser"]);
+    assert_eq!(code, 6, "modifying nonexistent user should exit 6");
+}
+
+#[test]
+fn test_multiple_modifications_combined() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "testuser:x:1000:1000:Old Name:/home/testuser:/bin/bash\n",
+        "testuser:$6$hash:19500:0:99999:7:::\n",
+        "testuser:x:1000:\n",
+    );
+
+    let code = run_with_prefix(
+        &dir,
+        &[
+            "-c",
+            "New Name",
+            "-s",
+            "/bin/zsh",
+            "-d",
+            "/new/home",
+            "testuser",
+        ],
+    );
+    assert_eq!(code, 0, "combined modifications should succeed");
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains(":New Name:"),
+        "GECOS should be updated, got: {content}"
+    );
+    assert!(
+        content.contains(":/bin/zsh"),
+        "shell should be updated, got: {content}"
+    );
+    assert!(
+        content.contains(":/new/home:"),
+        "home should be updated, got: {content}"
+    );
+}
+
+#[test]
+fn test_other_users_unchanged() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "alice:x:1001:1001:Alice:/home/alice:/bin/bash\n\
+         bob:x:1002:1002:Bob:/home/bob:/bin/bash\n\
+         charlie:x:1003:1003:Charlie:/home/charlie:/bin/bash\n",
+        "alice:$6$ahash:19500:0:99999:7:::\n\
+         bob:$6$bhash:19500:0:99999:7:::\n\
+         charlie:$6$chash:19500:0:99999:7:::\n",
+        "alice:x:1001:\nbob:x:1002:\ncharlie:x:1003:\n",
+    );
+
+    let code = run_with_prefix(&dir, &["-c", "Robert", "bob"]);
+    assert_eq!(code, 0);
+
+    let content = read_passwd(&dir);
+    assert!(
+        content.contains("alice:x:1001:1001:Alice:/home/alice:/bin/bash"),
+        "alice should be unchanged, got: {content}"
+    );
+    assert!(
+        content.contains("charlie:x:1003:1003:Charlie:/home/charlie:/bin/bash"),
+        "charlie should be unchanged, got: {content}"
+    );
+    assert!(
+        content.contains(":Robert:"),
+        "bob's GECOS should be updated, got: {content}"
+    );
+}
+
+#[test]
+fn test_uid_collision_fails() {
+    if skip_unless_root() {
+        return;
+    }
+
+    let dir = setup_prefix(
+        "alice:x:1001:1001:Alice:/home/alice:/bin/bash\n\
+         bob:x:1002:1002:Bob:/home/bob:/bin/bash\n",
+        "alice:$6$ahash:19500:0:99999:7:::\n\
+         bob:$6$bhash:19500:0:99999:7:::\n",
+        "alice:x:1001:\nbob:x:1002:\n",
+    );
+
+    // Try to set bob's UID to alice's UID -- should fail.
+    let code = run_with_prefix(&dir, &["-u", "1001", "bob"]);
+    assert_eq!(code, 4, "UID collision should exit 4");
+}
