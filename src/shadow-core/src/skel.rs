@@ -50,9 +50,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path, uid: u32, gid: u32) -> Result<(), 
                 .map_err(|e| ShadowError::IoPath(e, src_path.clone()))?;
             std::os::unix::fs::symlink(&target, &dst_path)
                 .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
-        } else {
+        } else if file_type.is_file() {
             std::fs::copy(&src_path, &dst_path)
                 .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
+        }
+        // Silently skip FIFOs, sockets, and device nodes — copying them
+        // would block indefinitely (FIFOs) or create security issues (devices).
+        else {
+            continue;
         }
 
         // Set ownership (lchown for symlinks — doesn't follow the target).

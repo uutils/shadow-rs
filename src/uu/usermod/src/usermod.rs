@@ -200,6 +200,17 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             let mut ge = group::read_group_file(&group_path)
                 .map_err(|e| UsermodError::CantUpdate(format!("{e}")))?;
 
+            // Validate all requested groups exist before mutating anything.
+            for gname in &new_groups {
+                if !ge.iter().any(|g| g.name == *gname) {
+                    drop(glock);
+                    return Err(UsermodError::CantUpdate(format!(
+                        "group '{gname}' does not exist"
+                    ))
+                    .into());
+                }
+            }
+
             if !append {
                 for g in &mut ge {
                     g.members.retain(|m| m != login);
