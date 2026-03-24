@@ -20,6 +20,7 @@ use std::path::Path;
 use clap::{Arg, ArgAction, Command};
 
 use shadow_core::atomic;
+use shadow_core::audit;
 use shadow_core::group::{self, GroupEntry};
 use shadow_core::gshadow::{self, GshadowEntry};
 use shadow_core::lock::FileLock;
@@ -476,6 +477,7 @@ fn parse_options(matches: &clap::ArgMatches) -> Result<UseraddOptions, UseraddEr
 // ---------------------------------------------------------------------------
 
 /// Execute the useradd operation.
+#[allow(clippy::too_many_lines)]
 fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     // Step 1: Validate username.
     validate::validate_username(&opts.login)
@@ -592,21 +594,49 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_shadow_entry(&shadow_path, &shadow_entry)?;
 
-    // Step 14: Add to supplementary groups.
+    // Step 14: Allocate subordinate UID/GID ranges for rootless containers.
+    // Only done when the relevant file exists (matching GNU shadow-utils behavior).
+    let subuid_path = opts.root.subuid_path();
+    if subuid_path.exists()
+        && let Err(e) = append_subid_entry(
+            &subuid_path,
+            &opts.login,
+            100_000 + u64::from(uid) * 65_536,
+            65_536,
+        )
+    {
+        uucore::show_error!("warning: failed to add subordinate UID range: {e}");
+    }
+    let subgid_path = opts.root.subgid_path();
+    if subgid_path.exists()
+        && let Err(e) = append_subid_entry(
+            &subgid_path,
+            &opts.login,
+            100_000 + u64::from(gid) * 65_536,
+            65_536,
+        )
+    {
+        uucore::show_error!("warning: failed to add subordinate GID range: {e}");
+    }
+
+    // Step 15: Add to supplementary groups.
     if !opts.groups.is_empty() {
         add_to_supplementary_groups(opts, &group_path, &gshadow_path)?;
     }
 
-    // Step 15: Create home directory and copy skel.
+    // Step 16: Create home directory and copy skel.
     if opts.create_home {
         let resolved_home = opts.root.resolve(&home_dir);
         let resolved_skel = opts.root.resolve(&opts.skel_dir);
         create_home_directory(&resolved_home, &resolved_skel, uid, gid)?;
     }
 
-    // Step 16: Invalidate nscd caches.
+    // Step 17: Invalidate nscd caches.
     nscd::invalidate_cache("passwd");
     nscd::invalidate_cache("group");
+
+    // Step 18: Audit log.
+    audit::log_user_event("ADD_USER", &opts.login, uid, true);
 
     Ok(())
 }
@@ -828,6 +858,52 @@ fn add_to_supplementary_groups(
             .map_err(|e| UseraddError::CannotUpdateGroup(format!("{e}")))?;
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Subordinate ID allocation
+// ---------------------------------------------------------------------------
+
+/// Append a subordinate ID entry to a subuid/subgid file.
+///
+/// Skips the write if the user already has an entry in the file.
+/// Uses file locking and atomic writes for crash safety.
+fn append_subid_entry(path: &Path, name: &str, start: u64, count: u64) -> UResult<()> {
+    use shadow_core::subid::{self, SubIdEntry};
+
+    let lock = FileLock::acquire(path).map_err(|e| {
+        UseraddError::CannotUpdatePasswd(format!("cannot lock {}: {e}", path.display()))
+    })?;
+
+    let mut entries = match subid::read_subid_file(path) {
+        Ok(e) => e,
+        Err(e) => {
+            uucore::show_error!("warning: cannot read {}: {e}", path.display());
+            return Err(UseraddError::CannotUpdatePasswd(format!(
+                "cannot read {}: {e}",
+                path.display()
+            ))
+            .into());
+        }
+    };
+
+    // Don't add a duplicate entry.
+    if entries.iter().any(|e| e.name == name) {
+        drop(lock);
+        return Ok(());
+    }
+
+    entries.push(SubIdEntry {
+        name: name.to_string(),
+        start,
+        count,
+    });
+
+    atomic::atomic_write(path, |f| subid::write_subid(&entries, f))
+        .map_err(|e| UseraddError::CannotUpdatePasswd(format!("{e}")))?;
+
+    drop(lock);
     Ok(())
 }
 

@@ -177,8 +177,12 @@ fn parse_yyyy_mm_dd(input: &str) -> Result<i64, String> {
     if !(1..=12).contains(&month) {
         return Err(format!("invalid month {month} in '{input}'"));
     }
-    if !(1..=31).contains(&day) {
-        return Err(format!("invalid day {day} in '{input}'"));
+
+    let max_day = days_in_month(year, month);
+    if day < 1 || day > max_day {
+        return Err(format!(
+            "invalid day {day} for {year}-{month:02} in '{input}'"
+        ));
     }
 
     Ok(days_since_epoch(year, month, day))
@@ -197,6 +201,28 @@ fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
     let doy = (153 * m + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Whether `year` is a leap year in the Gregorian calendar.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Number of days in a given month (1-indexed) for `year`.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        // Month range is already validated before calling this function.
+        _ => 0,
+    }
 }
 
 /// Convert days since epoch back to (year, month, day).
@@ -997,6 +1023,46 @@ mod tests {
     // -----------------------------------------------------------------------
     // Exit code constants consistency
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reject_feb_29_non_leap_year() {
+        assert!(
+            parse_yyyy_mm_dd("2025-02-29").is_err(),
+            "2025 is not a leap year, Feb 29 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_reject_feb_31() {
+        assert!(
+            parse_yyyy_mm_dd("2025-02-31").is_err(),
+            "February never has 31 days"
+        );
+    }
+
+    #[test]
+    fn test_accept_feb_29_leap_year() {
+        assert!(
+            parse_yyyy_mm_dd("2024-02-29").is_ok(),
+            "2024 is a leap year, Feb 29 should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_reject_apr_31() {
+        assert!(
+            parse_yyyy_mm_dd("2025-04-31").is_err(),
+            "April has 30 days, day 31 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_accept_jan_31() {
+        assert!(
+            parse_yyyy_mm_dd("2025-01-31").is_ok(),
+            "January has 31 days, should be accepted"
+        );
+    }
 
     #[test]
     fn test_exit_code_constants() {

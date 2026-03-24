@@ -14,6 +14,7 @@ use std::path::Path;
 use clap::{Arg, ArgAction, Command};
 use uucore::error::{UError, UResult};
 
+use shadow_core::audit;
 use shadow_core::group::{self};
 use shadow_core::gshadow::{self};
 use shadow_core::lock::FileLock;
@@ -97,12 +98,17 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         return Err(UserdelError::CantUpdatePasswd("Permission denied.".into()).into());
     }
 
-    // Read the user's home directory from /etc/passwd BEFORE removing the entry.
+    // Read the user's home directory and UID from /etc/passwd BEFORE removing
+    // the entry (needed for home removal and audit logging).
     let passwd_path = root.passwd_path();
+    let pre_entries = passwd::read_passwd_file(&passwd_path)
+        .map_err(|e| UserdelError::CantUpdatePasswd(format!("cannot read passwd: {e}")))?;
+    let saved_uid = pre_entries
+        .iter()
+        .find(|e| e.name == *login)
+        .map_or(0, |e| e.uid);
     let saved_home = if remove_home {
-        let entries = passwd::read_passwd_file(&passwd_path)
-            .map_err(|e| UserdelError::CantUpdatePasswd(format!("cannot read passwd: {e}")))?;
-        entries
+        pre_entries
             .iter()
             .find(|e| e.name == *login)
             .map(|e| e.home.clone())
@@ -150,6 +156,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     nscd::invalidate_cache("passwd");
     nscd::invalidate_cache("group");
+
+    audit::log_user_event("DEL_USER", login, saved_uid, true);
 
     Ok(())
 }

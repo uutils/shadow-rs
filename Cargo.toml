@@ -52,7 +52,7 @@ uucore = "0.7"
 thiserror = "2"
 
 # Unix/Linux
-nix = { version = "0.29", features = ["user", "fs", "process", "signal", "term", "resource"] }
+nix = { version = "0.30", features = ["user", "fs", "process", "signal", "term", "resource"] }
 libc = "0.2"
 
 # Security

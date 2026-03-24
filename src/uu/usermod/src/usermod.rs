@@ -14,6 +14,7 @@ use std::path::Path;
 use clap::{Arg, ArgAction, Command};
 use uucore::error::{UError, UResult};
 
+use shadow_core::audit;
 use shadow_core::group::{self};
 use shadow_core::lock::FileLock;
 use shadow_core::passwd::{self};
@@ -151,11 +152,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     drop(lock);
 
     // If the UID changed and the home directory was not explicitly moved,
-    // chown the existing home directory to the new UID.
+    // recursively chown the existing home directory to the new UID.
+    // Only files owned by old_uid are touched (files owned by other users
+    // are left alone, matching GNU shadow-utils behavior).
     if new_uid != old_uid && !home_is_changing && !home_for_chown.is_empty() {
         let home_path = root.resolve(&home_for_chown);
         if home_path.exists() {
-            let _ = nix::unistd::chown(&home_path, Some(nix::unistd::Uid::from_raw(new_uid)), None);
+            recursive_chown(&home_path, old_uid, new_uid);
         }
     }
 
@@ -278,7 +281,52 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     nscd::invalidate_cache("passwd");
     nscd::invalidate_cache("group");
+
+    audit::log_user_event("MOD_USER", login, new_uid, true);
+
     Ok(())
+}
+
+/// Recursively chown all files and directories under `path` that are owned by
+/// `old_uid` to `new_uid`. Files owned by other users are left untouched.
+///
+/// Uses `fchownat` with `AT_SYMLINK_NOFOLLOW` so symlinks themselves are
+/// re-owned without following them.
+fn recursive_chown(path: &Path, old_uid: u32, new_uid: u32) {
+    use nix::fcntl::AtFlags;
+    use std::os::unix::fs::MetadataExt;
+
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if let Ok(meta) = std::fs::symlink_metadata(&entry_path) {
+                if meta.uid() == old_uid {
+                    let _ = nix::unistd::fchownat(
+                        nix::fcntl::AT_FDCWD,
+                        &entry_path,
+                        Some(nix::unistd::Uid::from_raw(new_uid)),
+                        None,
+                        AtFlags::AT_SYMLINK_NOFOLLOW,
+                    );
+                }
+                if meta.is_dir() {
+                    recursive_chown(&entry_path, old_uid, new_uid);
+                }
+            }
+        }
+    }
+    // Also chown the directory itself.
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.uid() == old_uid
+    {
+        let _ = nix::unistd::fchownat(
+            nix::fcntl::AT_FDCWD,
+            path,
+            Some(nix::unistd::Uid::from_raw(new_uid)),
+            None,
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        );
+    }
 }
 
 #[must_use]

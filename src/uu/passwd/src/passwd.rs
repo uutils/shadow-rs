@@ -13,6 +13,7 @@ use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
 
+use shadow_core::audit;
 use shadow_core::lock::FileLock;
 use shadow_core::shadow::{self, ShadowEntry};
 use shadow_core::sysroot::SysRoot;
@@ -562,6 +563,13 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()>
             return Err(PasswdError::PamError(e.to_string()).into());
         }
 
+        audit::log_user_event(
+            "CHNG_PASSWD",
+            _target_user,
+            nix::unistd::getuid().as_raw(),
+            true,
+        );
+
         Ok(())
     }
 
@@ -810,6 +818,13 @@ where
     // Release lock and invalidate caches.
     drop(lock);
     nscd::invalidate_cache("shadow");
+
+    audit::log_user_event(
+        "CHNG_PASSWD",
+        username,
+        nix::unistd::getuid().as_raw(),
+        true,
+    );
 
     if !quiet {
         uucore::show_error!("{action} for user {username}");

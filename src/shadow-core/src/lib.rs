@@ -41,6 +41,7 @@ pub mod crypt;
 pub mod selinux;
 
 pub mod atomic;
+pub mod audit;
 pub mod hardening;
 pub mod lock;
 pub mod nscd;

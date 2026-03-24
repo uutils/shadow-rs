@@ -15,6 +15,7 @@ use clap::{Arg, ArgAction, Command};
 use uucore::error::{UError, UResult};
 
 use shadow_core::atomic;
+use shadow_core::audit;
 use shadow_core::group::{self};
 use shadow_core::gshadow::{self};
 use shadow_core::lock::FileLock;
@@ -184,6 +185,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         entries[idx].name.clone_from(name);
     }
 
+    let modified_gid = entries[idx].gid;
+
     // Write /etc/group.
     atomic::atomic_write(&group_path, |f| group::write_group(&entries, f)).map_err(|e| {
         GroupmodError::CantUpdate(format!("cannot write {}: {e}", group_path.display()))
@@ -219,6 +222,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     nscd::invalidate_cache("group");
+
+    audit::log_user_event("MOD_GROUP", group_name, modified_gid, true);
 
     Ok(())
 }

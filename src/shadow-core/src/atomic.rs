@@ -14,7 +14,6 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -126,7 +125,7 @@ where
     tmp_file
         .flush()
         .map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
-    nix::unistd::fsync(tmp_file.as_raw_fd())
+    nix::unistd::fsync(&tmp_file)
         .map_err(|e| ShadowError::IoPath(io::Error::from(e), tmp_path.clone()))?;
 
     // Atomic rename.
@@ -137,7 +136,7 @@ where
 
     // Fsync the parent directory to ensure the rename is durable.
     if let Ok(dir_fd) = File::open(dir) {
-        let _ = nix::unistd::fsync(dir_fd.as_raw_fd());
+        let _ = nix::unistd::fsync(&dir_fd);
     }
 
     Ok(())

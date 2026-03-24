@@ -15,6 +15,7 @@ use clap::{Arg, Command};
 use uucore::error::{UError, UResult};
 
 use shadow_core::atomic;
+use shadow_core::audit;
 use shadow_core::group::{self, GroupEntry};
 use shadow_core::gshadow::{self, GshadowEntry};
 use shadow_core::lock::FileLock;
@@ -192,6 +193,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     nscd::invalidate_cache("group");
+
+    audit::log_user_event("DEL_GROUP", group_name, target_gid, true);
 
     Ok(())
 }

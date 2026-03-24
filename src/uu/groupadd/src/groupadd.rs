@@ -15,6 +15,7 @@ use clap::{Arg, ArgAction, Command};
 use uucore::error::{UError, UResult};
 
 use shadow_core::atomic;
+use shadow_core::audit;
 use shadow_core::group::{self, GroupEntry};
 use shadow_core::gshadow::{self, GshadowEntry};
 use shadow_core::lock::FileLock;
@@ -194,6 +195,8 @@ fn do_groupadd(matches: &clap::ArgMatches) -> UResult<()> {
     write_gshadow_entry(&root.gshadow_path(), &group_name, &password)?;
 
     nscd::invalidate_cache("group");
+
+    audit::log_user_event("ADD_GROUP", &group_name, gid, true);
 
     Ok(())
 }
