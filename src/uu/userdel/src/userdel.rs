@@ -211,10 +211,12 @@ fn safe_remove_home(home: &Path) -> Result<(), UserdelError> {
         return Ok(());
     }
 
-    // Check against protected paths.
-    let canonical = home.to_str().unwrap_or("");
+    // Resolve symlinks and relative components so tricks like
+    // `/home/../etc` cannot bypass the protected-directory check.
+    let canonical = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_owned());
+    let canonical_str = canonical.to_string_lossy();
     for &protected in PROTECTED_DIRS {
-        if canonical == protected {
+        if canonical_str == protected {
             return Err(UserdelError::CantRemoveHome(format!(
                 "refusing to remove protected directory '{}'",
                 home.display()

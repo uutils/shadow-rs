@@ -456,33 +456,44 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     validate::validate_username(&opts.login)
         .map_err(|e| UseraddError::BadArgument(format!("{e}")))?;
 
-    // Step 2: Check username not already in use.
+    // Step 2: Acquire locks BEFORE reading so concurrent useradd cannot
+    // silently overwrite entries added between our read and write.
     let passwd_path = opts.root.passwd_path();
+    let passwd_lock = FileLock::acquire(&passwd_path)
+        .map_err(|e| UseraddError::CannotUpdatePasswd(format!("cannot lock passwd: {e}")))?;
+
+    let group_path = opts.root.group_path();
+    let group_lock = FileLock::acquire(&group_path)
+        .map_err(|e| UseraddError::CannotUpdateGroup(format!("cannot lock group: {e}")))?;
+
+    // Step 3: Read passwd under lock and check username not already in use.
     let passwd_entries = passwd::read_passwd_file(&passwd_path)
         .map_err(|e| UseraddError::CannotUpdatePasswd(format!("{e}")))?;
 
     if passwd_entries.iter().any(|e| e.name == opts.login) {
+        drop(group_lock);
+        drop(passwd_lock);
         return Err(
             UseraddError::UsernameInUse(format!("user '{}' already exists", opts.login)).into(),
         );
     }
 
-    // Step 3: Load login.defs for UID/GID ranges.
+    // Step 4: Load login.defs for UID/GID ranges.
     let defs = LoginDefs::load(&opts.root.login_defs_path())
         .map_err(|e| UseraddError::CannotUpdatePasswd(format!("{e}")))?;
 
-    // Step 4: Determine UID.
+    // Step 5: Determine UID.
     let uid = determine_uid(opts, &passwd_entries, &defs)?;
 
-    // Step 5: Read group entries (needed for GID resolution and user group creation).
-    let group_path = opts.root.group_path();
+    // Step 6: Read group entries under lock (needed for GID resolution and
+    // user group creation).
     let mut group_entries = group::read_group_file(&group_path)
         .map_err(|e| UseraddError::CannotUpdateGroup(format!("{e}")))?;
 
-    // Step 6: Determine primary GID.
+    // Step 7: Determine primary GID.
     let (gid, new_group) = determine_gid(opts, uid, &group_entries, &defs)?;
 
-    // Step 7: Read gshadow entries.
+    // Step 8: Read gshadow entries.
     let gshadow_path = opts.root.gshadow_path();
     let mut gshadow_entries = if gshadow_path.exists() {
         gshadow::read_gshadow_file(&gshadow_path)
@@ -491,16 +502,18 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
         Vec::new()
     };
 
-    // Step 8: Validate supplementary groups exist.
+    // Step 9: Validate supplementary groups exist.
     for grp_name in &opts.groups {
         if !group_entries.iter().any(|g| g.name == *grp_name) {
+            drop(group_lock);
+            drop(passwd_lock);
             return Err(
                 UseraddError::GroupNotExist(format!("group '{grp_name}' does not exist")).into(),
             );
         }
     }
 
-    // Step 9: Determine home directory path.
+    // Step 10: Determine home directory path.
     let home_dir = opts.home_dir.clone().unwrap_or_else(|| {
         let home_base = defs.get("HOME").unwrap_or("/home");
         format!("{home_base}/{}", opts.login)
@@ -508,10 +521,10 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
 
     // -------------------------------------------------------------------
     // Begin mutations. From here, partial state is left on failure
-    // (matching GNU behavior).
+    // (matching GNU behavior). Locks are held throughout.
     // -------------------------------------------------------------------
 
-    // Step 10: Create user group if needed.
+    // Step 11: Create user group if needed (lock already held).
     if let Some(ref new_grp) = new_group {
         write_new_group(&group_path, &mut group_entries, new_grp)?;
         if gshadow_path.exists() {
@@ -519,7 +532,7 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
         }
     }
 
-    // Step 11: Write /etc/passwd entry.
+    // Step 12: Write /etc/passwd entry (lock already held).
     let passwd_entry = PasswdEntry {
         name: opts.login.clone(),
         passwd: "x".to_string(),
@@ -531,7 +544,11 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_passwd_entry(&passwd_path, &passwd_entries, &passwd_entry)?;
 
-    // Step 12: Write /etc/shadow entry.
+    // Release locks now that passwd and group writes are complete.
+    drop(group_lock);
+    drop(passwd_lock);
+
+    // Step 13: Write /etc/shadow entry.
     let shadow_path = opts.root.shadow_path();
     let shadow_entry = ShadowEntry {
         name: opts.login.clone(),
@@ -546,17 +563,17 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_shadow_entry(&shadow_path, &shadow_entry)?;
 
-    // Step 13: Add to supplementary groups.
+    // Step 14: Add to supplementary groups.
     if !opts.groups.is_empty() {
         add_to_supplementary_groups(opts, &group_path, &gshadow_path)?;
     }
 
-    // Step 14: Create home directory and copy skel.
+    // Step 15: Create home directory and copy skel.
     if opts.create_home {
         create_home_directory(&home_dir, &opts.skel_dir, uid, gid)?;
     }
 
-    // Step 15: Invalidate nscd caches.
+    // Step 16: Invalidate nscd caches.
     nscd::invalidate_cache("passwd");
     nscd::invalidate_cache("group");
 
@@ -665,15 +682,14 @@ fn resolve_group(gid_arg: &str, group_entries: &[GroupEntry]) -> Result<u32, Use
 // File writers
 // ---------------------------------------------------------------------------
 
-/// Append a new group entry to `/etc/group` with proper locking.
+/// Append a new group entry to `/etc/group`.
+///
+/// Caller must hold the group file lock.
 fn write_new_group(
     group_path: &Path,
     group_entries: &mut Vec<GroupEntry>,
     new_group: &GroupEntry,
 ) -> UResult<()> {
-    let _lock = FileLock::acquire(group_path)
-        .map_err(|e| UseraddError::CannotUpdateGroup(format!("{e}")))?;
-
     group_entries.push(new_group.clone());
 
     atomic::atomic_write(group_path, |f| group::write_group(group_entries, f))
@@ -682,15 +698,15 @@ fn write_new_group(
     Ok(())
 }
 
-/// Append a new gshadow entry to `/etc/gshadow` with proper locking.
+/// Append a new gshadow entry to `/etc/gshadow`.
+///
+/// Caller must hold the gshadow file lock (or the group file lock
+/// if gshadow is protected by the same lock scheme).
 fn write_new_gshadow(
     gshadow_path: &Path,
     gshadow_entries: &mut Vec<GshadowEntry>,
     new_group: &GroupEntry,
 ) -> UResult<()> {
-    let _lock = FileLock::acquire(gshadow_path)
-        .map_err(|e| UseraddError::CannotUpdateGroup(format!("{e}")))?;
-
     gshadow_entries.push(GshadowEntry {
         name: new_group.name.clone(),
         passwd: "!".to_string(),
@@ -704,15 +720,14 @@ fn write_new_gshadow(
     Ok(())
 }
 
-/// Append a new passwd entry to `/etc/passwd` with proper locking.
+/// Append a new passwd entry to `/etc/passwd`.
+///
+/// Caller must hold the passwd file lock.
 fn write_passwd_entry(
     passwd_path: &Path,
     existing: &[PasswdEntry],
     new_entry: &PasswdEntry,
 ) -> UResult<()> {
-    let _lock = FileLock::acquire(passwd_path)
-        .map_err(|e| UseraddError::CannotUpdatePasswd(format!("{e}")))?;
-
     let mut entries: Vec<PasswdEntry> = existing.to_vec();
     entries.push(new_entry.clone());
 

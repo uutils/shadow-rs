@@ -157,16 +157,35 @@ fn tmp_lock_path(lock_path: &Path) -> PathBuf {
 }
 
 /// Write our PID to a temp file for later hard-linking.
+///
+/// Uses `O_CREAT | O_EXCL` (`create_new`) to prevent symlink attacks: if
+/// an attacker plants a symlink at `tmp_path`, `open` will fail instead of
+/// following it. If the file already exists from a previous crashed run,
+/// we remove it first and retry once.
 fn write_pid_file(tmp_path: &Path) -> Result<(), ShadowError> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(tmp_path)
-        .map_err(|e| {
-            ShadowError::Lock(format!("cannot create {}: {e}", tmp_path.display()).into())
-        })?;
+    let open_exclusive = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp_path)
+    };
+
+    let mut file = match open_exclusive() {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Stale temp file from a previous crashed run — remove and retry.
+            let _ = fs::remove_file(tmp_path);
+            open_exclusive().map_err(|e2| {
+                ShadowError::Lock(format!("cannot create {}: {e2}", tmp_path.display()).into())
+            })?
+        }
+        Err(e) => {
+            return Err(ShadowError::Lock(
+                format!("cannot create {}: {e}", tmp_path.display()).into(),
+            ));
+        }
+    };
 
     let pid = unistd::getpid();
     write!(file, "{pid}").map_err(|e| {
