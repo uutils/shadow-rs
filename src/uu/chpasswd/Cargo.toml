@@ -20,6 +20,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 shadow-core = { workspace = true, features = ["shadow"] }
 uucore = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -16,7 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-libc = { workspace = true }
 nix = { workspace = true }
 shadow-core = { workspace = true, features = ["shadow"] }
 uucore = { workspace = true }

@@ -34,6 +34,7 @@ pub mod pam;
 pub mod selinux;
 
 pub mod atomic;
+pub mod hardening;
 pub mod lock;
 pub mod nscd;
 pub mod skel;

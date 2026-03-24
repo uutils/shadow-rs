@@ -61,33 +61,7 @@ impl UError for NewgrpError {
 // Security hardening
 // ---------------------------------------------------------------------------
 
-fn suppress_core_dumps() {
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl with PR_SET_DUMPABLE is a simple flag set, no pointers.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0);
-        }
-    }
-}
-
-fn sanitize_env() {
-    let saved: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
-        .collect();
-
-    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
-    for key in keys {
-        std::env::remove_var(&key);
-    }
-
-    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-    for (key, val) in saved {
-        std::env::set_var(&key, &val);
-    }
-}
+// Hardening functions are now centralized in shadow_core::hardening.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -157,17 +131,79 @@ fn group_has_password(gshadow_path: &Path, group_name: &str) -> Option<String> {
     Some(entry.passwd.clone())
 }
 
-/// Read a password from the terminal (no echo).
-///
-/// In a full implementation this would disable echo via termios and read
-/// from `/dev/tty`. For now we read a line from stdin.
+/// RAII guard that restores terminal echo on drop.
+struct EchoGuard {
+    tty: std::fs::File,
+    old_termios: nix::sys::termios::Termios,
+}
+
+impl EchoGuard {
+    /// Disable echo on the given tty file.
+    fn disable(tty: std::fs::File) -> Result<Self, NewgrpError> {
+        use std::os::unix::io::AsFd;
+
+        let old_termios = nix::sys::termios::tcgetattr(tty.as_fd())
+            .map_err(|e| NewgrpError::Error(format!("cannot get terminal attributes: {e}")))?;
+
+        let mut new_termios = old_termios.clone();
+        new_termios.local_flags &= !nix::sys::termios::LocalFlags::ECHO;
+        nix::sys::termios::tcsetattr(
+            tty.as_fd(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &new_termios,
+        )
+        .map_err(|e| NewgrpError::Error(format!("cannot disable echo: {e}")))?;
+
+        Ok(Self { tty, old_termios })
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsFd;
+        let _ = nix::sys::termios::tcsetattr(
+            self.tty.as_fd(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.old_termios,
+        );
+    }
+}
+
+/// Read a password from `/dev/tty` with echo disabled.
 fn read_password(prompt: &str) -> Result<String, NewgrpError> {
-    eprint!("{prompt}");
+    use std::io::{BufRead, Write};
+
+    let tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|e| NewgrpError::Error(format!("cannot open /dev/tty: {e}")))?;
+
+    // Write the prompt.
+    (&tty)
+        .write_all(prompt.as_bytes())
+        .map_err(|e| NewgrpError::Error(format!("cannot write prompt: {e}")))?;
+    (&tty)
+        .flush()
+        .map_err(|e| NewgrpError::Error(format!("cannot flush prompt: {e}")))?;
+
+    // Clone the tty handle: one for the guard (to restore echo), one for reading.
+    let tty_for_guard = tty
+        .try_clone()
+        .map_err(|e| NewgrpError::Error(format!("cannot clone tty handle: {e}")))?;
+
+    // Disable echo; restored automatically on drop.
+    let guard = EchoGuard::disable(tty_for_guard)?;
 
     let mut buf = String::new();
-    std::io::stdin()
+    let mut reader = std::io::BufReader::new(&tty);
+    reader
         .read_line(&mut buf)
         .map_err(|e| NewgrpError::Error(format!("cannot read password: {e}")))?;
+
+    // Echo was off, so print newline after the user presses Enter.
+    drop(guard);
+    let _ = (&tty).write_all(b"\n");
 
     Ok(buf.trim_end_matches('\n').to_string())
 }
@@ -208,13 +244,13 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, NewgrpError> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    suppress_core_dumps();
+    shadow_core::hardening::suppress_core_dumps();
     // We intentionally do NOT fully sanitize env for newgrp because it
     // needs to preserve $SHELL and $HOME for the new shell session.
     // However, we do save/restore SHELL before any env manipulation.
     let saved_shell = std::env::var("SHELL").ok();
     let saved_home = std::env::var("HOME").ok();
-    sanitize_env();
+    shadow_core::hardening::sanitize_env();
     // Restore SHELL and HOME for the new shell session.
     if let Some(shell) = &saved_shell {
         std::env::set_var("SHELL", shell);

@@ -108,70 +108,7 @@ impl UError for PasswdError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Security hardening — process hardening
-// ---------------------------------------------------------------------------
-
-/// Suppress core dumps and prevent ptrace attachment.
-///
-/// OpenBSD's `pw_init()` sets `RLIMIT_CORE=0`. A core dump from a setuid
-/// passwd process could expose password hashes and plaintext passwords.
-fn suppress_core_dumps() {
-    // RLIMIT_CORE = 0: no core dumps. Best-effort — ignore errors.
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    // PR_SET_DUMPABLE = 0: prevent ptrace attachment and /proc/pid/mem reads.
-    // Linux-specific — silently skipped on other platforms.
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl with PR_SET_DUMPABLE is a simple flag set, no pointers.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0);
-        }
-    }
-}
-
-/// Raise `RLIMIT_FSIZE` to prevent truncated file writes.
-///
-/// OpenBSD raises `RLIMIT_FSIZE` to infinity before file operations. A
-/// malicious caller could `ulimit -f 1` before invoking setuid passwd,
-/// causing /etc/shadow to be truncated mid-write.
-fn raise_file_size_limit() {
-    let _ = nix::sys::resource::setrlimit(
-        nix::sys::resource::Resource::RLIMIT_FSIZE,
-        nix::sys::resource::RLIM_INFINITY,
-        nix::sys::resource::RLIM_INFINITY,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Security hardening — environment sanitization
-// ---------------------------------------------------------------------------
-
-/// Sanitize the environment for setuid-root context.
-///
-/// Clears all environment variables except essential ones and sets
-/// PATH to a safe default. Prevents environment variable injection
-/// attacks when running as setuid-root (e.g. `LD_PRELOAD`, IFS, CDPATH).
-fn sanitize_env() {
-    // Save variables we want to keep: TERM, LANG, and all LC_* locale vars.
-    let saved: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
-        .collect();
-
-    // Collect all keys first to avoid modifying the env during iteration.
-    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
-    for key in keys {
-        std::env::remove_var(&key);
-    }
-
-    // Set safe PATH.
-    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-    // Restore kept variables.
-    for (key, val) in saved {
-        std::env::set_var(&key, &val);
-    }
-}
+// Hardening functions are now centralized in shadow_core::hardening.
 
 // ---------------------------------------------------------------------------
 // Security hardening — landlock filesystem restriction
@@ -206,9 +143,7 @@ fn apply_landlock_inner(_root: &SysRoot) {
 #[uucore::main]
 #[allow(clippy::too_many_lines)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    suppress_core_dumps();
-    raise_file_size_limit();
-    sanitize_env();
+    shadow_core::hardening::harden_process();
 
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
@@ -1535,7 +1470,7 @@ mod tests {
         std::env::set_var("TERM", "xterm-256color");
         std::env::set_var("LC_TIME", "en_US.UTF-8");
 
-        sanitize_env();
+        shadow_core::hardening::sanitize_env();
 
         // Dangerous vars must be gone.
         assert!(
@@ -1568,7 +1503,7 @@ mod tests {
     #[test]
     fn test_core_dump_suppression() {
         // After calling suppress_core_dumps(), RLIMIT_CORE should be 0.
-        suppress_core_dumps();
+        shadow_core::hardening::suppress_core_dumps();
         let (soft, _hard) =
             nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE).unwrap();
         assert_eq!(soft, 0, "RLIMIT_CORE should be 0 after suppression");
@@ -1576,7 +1511,7 @@ mod tests {
 
     #[test]
     fn test_raise_file_size_limit() {
-        raise_file_size_limit();
+        shadow_core::hardening::raise_file_size_limit();
         let (soft, _hard) =
             nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_FSIZE).unwrap();
         // In environments where the hard limit is already restricted (containers,

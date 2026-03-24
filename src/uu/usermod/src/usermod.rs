@@ -108,6 +108,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         return Err(UsermodError::UserNotFound(format!("user '{login}' does not exist")).into());
     };
 
+    // Save the old UID and home dir before mutation so we can chown if needed.
+    let old_uid = entries[idx].uid;
+    let home_for_chown = entries[idx].home.clone();
+    let home_is_changing = matches.get_one::<String>(options::HOME).is_some();
+
     // Check UID collision before mutating.
     if let Some(&uid) = matches.get_one::<u32>(options::UID) {
         if entries.iter().any(|e| e.uid == uid && e.name != *login) {
@@ -133,9 +138,20 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         entries[idx].name.clone_from(new_login);
     }
 
+    let new_uid = entries[idx].uid;
+
     atomic::atomic_write(&passwd_path, |f| passwd::write_passwd(&entries, f))
         .map_err(|e| UsermodError::CantUpdate(format!("{e}")))?;
     drop(lock);
+
+    // If the UID changed and the home directory was not explicitly moved,
+    // chown the existing home directory to the new UID.
+    if new_uid != old_uid && !home_is_changing && !home_for_chown.is_empty() {
+        let home_path = root.resolve(&home_for_chown);
+        if home_path.exists() {
+            let _ = nix::unistd::chown(&home_path, Some(nix::unistd::Uid::from_raw(new_uid)), None);
+        }
+    }
 
     // Shadow modifications.
     let shadow_path = root.shadow_path();

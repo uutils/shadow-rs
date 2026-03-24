@@ -167,48 +167,7 @@ struct UseraddOptions {
     root: SysRoot,
 }
 
-// ---------------------------------------------------------------------------
-// Security hardening
-// ---------------------------------------------------------------------------
-
-/// Suppress core dumps and prevent ptrace attachment.
-fn suppress_core_dumps() {
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl with PR_SET_DUMPABLE is a simple flag set, no pointers.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0);
-        }
-    }
-}
-
-/// Raise `RLIMIT_FSIZE` to prevent truncated file writes.
-fn raise_file_size_limit() {
-    let _ = nix::sys::resource::setrlimit(
-        nix::sys::resource::Resource::RLIMIT_FSIZE,
-        nix::sys::resource::RLIM_INFINITY,
-        nix::sys::resource::RLIM_INFINITY,
-    );
-}
-
-/// Sanitize environment for setuid-root context.
-fn sanitize_env() {
-    let saved: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
-        .collect();
-
-    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
-    for key in keys {
-        std::env::remove_var(&key);
-    }
-
-    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-    for (key, val) in saved {
-        std::env::set_var(&key, &val);
-    }
-}
+// Hardening functions are now centralized in shadow_core::hardening.
 
 /// Check whether the real UID is root.
 fn caller_is_root() -> bool {
@@ -287,9 +246,7 @@ fn today_days_since_epoch() -> i64 {
 /// Entry point for the `useradd` utility.
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    suppress_core_dumps();
-    raise_file_size_limit();
-    sanitize_env();
+    shadow_core::hardening::harden_process();
 
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
@@ -836,18 +793,23 @@ fn add_to_supplementary_groups(
 fn create_home_directory(home_dir: &str, skel_dir: &str, uid: u32, gid: u32) -> UResult<()> {
     let home_path = Path::new(home_dir);
 
-    if home_path.exists() {
-        uucore::show_warning!(
-            "home directory '{}' already exists -- not copying from skel directory",
-            home_dir
-        );
-        return Ok(());
+    // Use create_dir (not create_dir_all) to avoid TOCTOU between exists() and mkdir().
+    match std::fs::create_dir(home_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            uucore::show_warning!(
+                "home directory '{}' already exists -- not copying from skel directory",
+                home_dir
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(UseraddError::CannotCreateHome(format!(
+                "cannot create directory '{home_dir}': {e}"
+            ))
+            .into());
+        }
     }
-
-    // Create the home directory with 0755 permissions (before chown).
-    std::fs::create_dir_all(home_path).map_err(|e| {
-        UseraddError::CannotCreateHome(format!("cannot create directory '{home_dir}': {e}"))
-    })?;
 
     // Set permissions to 0700 (home directories should be private by default).
     std::fs::set_permissions(home_path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {

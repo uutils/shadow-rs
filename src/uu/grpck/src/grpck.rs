@@ -289,6 +289,11 @@ fn load_gshadow_file(path: &Path, quiet: bool) -> Vec<GshadowEntry> {
 }
 
 /// Sort group entries by GID and write back atomically.
+///
+/// NOTE: Sorting operates on parsed entries and discards any comments or
+/// blank lines from the original file. A lossless (comment-preserving)
+/// sort would require a significantly different parser that tracks raw
+/// lines alongside parsed entries. This matches GNU `grpck -s` behavior.
 fn sort_and_write(
     group_path: &Path,
     gshadow_path: &Path,

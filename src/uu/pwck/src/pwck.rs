@@ -242,6 +242,11 @@ fn load_group_file(path: &Path, quiet: bool) -> Vec<GroupEntry> {
 ///
 /// When `read_only` is true (i.e. `-r -s`), compute the sorted order but
 /// skip all file writes, matching GNU `pwck -r -s` behaviour.
+///
+/// NOTE: Sorting operates on parsed entries and discards any comments or
+/// blank lines from the original file. A lossless (comment-preserving)
+/// sort would require a significantly different parser that tracks raw
+/// lines alongside parsed entries. This matches GNU `pwck -s` behavior.
 fn sort_and_write(
     passwd_path: &Path,
     shadow_path: &Path,

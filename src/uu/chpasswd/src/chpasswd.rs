@@ -77,48 +77,7 @@ impl UError for ChpasswdError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Security hardening
-// ---------------------------------------------------------------------------
-
-/// Suppress core dumps and prevent ptrace attachment.
-fn suppress_core_dumps() {
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl with PR_SET_DUMPABLE is a simple flag set, no pointers.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0);
-        }
-    }
-}
-
-/// Raise `RLIMIT_FSIZE` to prevent truncated file writes.
-fn raise_file_size_limit() {
-    let _ = nix::sys::resource::setrlimit(
-        nix::sys::resource::Resource::RLIMIT_FSIZE,
-        nix::sys::resource::RLIM_INFINITY,
-        nix::sys::resource::RLIM_INFINITY,
-    );
-}
-
-/// Sanitize the environment for setuid-root context.
-fn sanitize_env() {
-    let saved: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
-        .collect();
-
-    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
-    for key in keys {
-        std::env::remove_var(&key);
-    }
-
-    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-    for (key, val) in saved {
-        std::env::set_var(&key, &val);
-    }
-}
+// Hardening functions are now centralized in shadow_core::hardening.
 
 // ---------------------------------------------------------------------------
 // Signal blocking during critical sections
@@ -162,9 +121,13 @@ impl Drop for SignalBlocker {
 // ---------------------------------------------------------------------------
 
 /// A parsed `username:password` pair from stdin.
+///
+/// The password field uses `Zeroizing` to ensure it is scrubbed from
+/// memory when dropped, preventing password leaks via core dumps or
+/// heap inspection.
 struct PasswordPair {
     username: String,
-    password: String,
+    password: zeroize::Zeroizing<String>,
 }
 
 /// Parse a single input line into a `username:password` pair.
@@ -195,7 +158,7 @@ fn parse_input_line(line: &str, line_number: usize) -> Result<PasswordPair, Chpa
 
     Ok(PasswordPair {
         username: username.to_string(),
-        password: password.to_string(),
+        password: zeroize::Zeroizing::new(password.to_string()),
     })
 }
 
@@ -240,9 +203,7 @@ fn days_since_epoch() -> i64 {
 /// Entry point for the `chpasswd` utility.
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    suppress_core_dumps();
-    raise_file_size_limit();
-    sanitize_env();
+    shadow_core::hardening::harden_process();
 
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
@@ -390,7 +351,7 @@ fn apply_password_changes(root: &SysRoot, pairs: &[PasswordPair]) -> UResult<()>
         };
 
         // Update the password hash and last_change date.
-        entry.passwd.clone_from(&pair.password);
+        entry.passwd.clone_from(&*pair.password);
         entry.last_change = Some(today);
     }
 
@@ -548,14 +509,14 @@ mod tests {
     fn test_parse_input_line_valid() {
         let pair = parse_input_line("testuser:$6$hash", 1).expect("should parse");
         assert_eq!(pair.username, "testuser");
-        assert_eq!(pair.password, "$6$hash");
+        assert_eq!(&*pair.password, "$6$hash");
     }
 
     #[test]
     fn test_parse_input_line_empty_password() {
         let pair = parse_input_line("testuser:", 1).expect("should parse empty password");
         assert_eq!(pair.username, "testuser");
-        assert_eq!(pair.password, "");
+        assert_eq!(&*pair.password, "");
     }
 
     #[test]
@@ -564,7 +525,7 @@ mod tests {
         let pair = parse_input_line("testuser:$6$salt:hash:rest", 1).expect("should parse");
         assert_eq!(pair.username, "testuser");
         // Only the first colon is the separator; rest is password.
-        assert_eq!(pair.password, "$6$salt:hash:rest");
+        assert_eq!(&*pair.password, "$6$salt:hash:rest");
     }
 
     #[test]
@@ -595,7 +556,7 @@ mod tests {
     fn test_parse_input_line_leading_whitespace() {
         let pair = parse_input_line("  testuser:$6$hash  ", 1).expect("should handle whitespace");
         assert_eq!(pair.username, "testuser");
-        assert_eq!(pair.password, "$6$hash");
+        assert_eq!(&*pair.password, "$6$hash");
     }
 
     // -----------------------------------------------------------------------

@@ -93,48 +93,7 @@ impl UError for ChageError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Security hardening
-// ---------------------------------------------------------------------------
-
-/// Suppress core dumps and prevent ptrace attachment.
-fn suppress_core_dumps() {
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl with PR_SET_DUMPABLE is a simple flag set, no pointers.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0);
-        }
-    }
-}
-
-/// Raise `RLIMIT_FSIZE` to prevent truncated file writes.
-fn raise_file_size_limit() {
-    let _ = nix::sys::resource::setrlimit(
-        nix::sys::resource::Resource::RLIMIT_FSIZE,
-        nix::sys::resource::RLIM_INFINITY,
-        nix::sys::resource::RLIM_INFINITY,
-    );
-}
-
-/// Sanitize the environment for setuid-root context.
-fn sanitize_env() {
-    let saved: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "TERM" || k == "LANG" || k.starts_with("LC_"))
-        .collect();
-
-    let keys: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
-    for key in keys {
-        std::env::remove_var(&key);
-    }
-
-    std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-    for (key, val) in saved {
-        std::env::set_var(&key, &val);
-    }
-}
+// Hardening functions are now centralized in shadow_core::hardening.
 
 // ---------------------------------------------------------------------------
 // Signal blocking during critical sections
@@ -194,7 +153,9 @@ fn parse_date_arg(input: &str) -> Result<i64, String> {
     parse_yyyy_mm_dd(input)
 }
 
-/// Parse `YYYY-MM-DD` into days since epoch.
+/// Parse `YYYY-MM-DD` into days since epoch using pure calendar math.
+///
+/// Uses the Howard Hinnant algorithm to avoid timezone-dependent `mktime`.
 fn parse_yyyy_mm_dd(input: &str) -> Result<i64, String> {
     let parts: Vec<&str> = input.split('-').collect();
     if parts.len() != 3 {
@@ -203,13 +164,13 @@ fn parse_yyyy_mm_dd(input: &str) -> Result<i64, String> {
         ));
     }
 
-    let year: i32 = parts[0]
+    let year: i64 = parts[0]
         .parse()
         .map_err(|_| format!("invalid year in '{input}'"))?;
-    let month: i32 = parts[1]
+    let month: i64 = parts[1]
         .parse()
         .map_err(|_| format!("invalid month in '{input}'"))?;
-    let day: i32 = parts[2]
+    let day: i64 = parts[2]
         .parse()
         .map_err(|_| format!("invalid day in '{input}'"))?;
 
@@ -220,48 +181,58 @@ fn parse_yyyy_mm_dd(input: &str) -> Result<i64, String> {
         return Err(format!("invalid day {day} in '{input}'"));
     }
 
-    // Use libc::mktime to convert calendar date to epoch seconds.
-    // SAFETY: zeroed tm struct is valid for mktime to populate.
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-    tm.tm_isdst = -1;
+    Ok(days_since_epoch(year, month, day))
+}
 
-    // SAFETY: tm is a properly initialized local variable, mktime is reentrant.
-    let epoch_secs = unsafe { libc::mktime(&raw mut tm) };
-    if epoch_secs == -1 {
-        return Err(format!("invalid date '{input}'"));
-    }
+/// Calculate days since Unix epoch (1970-01-01) for a given date.
+///
+/// Uses the algorithm from <https://howardhinnant.github.io/date_algorithms.html>.
+/// Pure arithmetic, no timezone dependency.
+fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 9 } else { month - 3 };
 
-    Ok(epoch_secs / 86400)
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Convert days since epoch back to (year, month, day).
+///
+/// Inverse of `days_since_epoch`, also from the Hinnant algorithms.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 /// Convert days since epoch to a human-readable date string (e.g., "Mar 23, 2026").
+///
+/// Uses pure calendar math instead of `localtime_r` to avoid timezone issues.
 fn format_date_human(days: i64) -> String {
-    let secs = days * 86400;
-    // SAFETY: zeroed tm struct is valid for localtime_r to populate.
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    let time = secs as libc::time_t;
-    // SAFETY: both pointers are valid, properly aligned, and localtime_r is reentrant.
-    unsafe {
-        libc::localtime_r(&raw const time, &raw mut tm);
-    }
+    let (year, month, day) = civil_from_days(days);
 
     let month_names = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
 
-    let month_name = usize::try_from(tm.tm_mon)
+    let month_name = usize::try_from(month - 1)
         .ok()
         .and_then(|idx| month_names.get(idx))
         .copied()
         .unwrap_or("???");
 
-    format!("{} {:02}, {:04}", month_name, tm.tm_mday, tm.tm_year + 1900)
+    format!("{month_name} {day:02}, {year:04}")
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +242,7 @@ fn format_date_human(days: i64) -> String {
 /// Entry point for the `chage` utility.
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    suppress_core_dumps();
-    raise_file_size_limit();
-    sanitize_env();
+    shadow_core::hardening::harden_process();
 
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,

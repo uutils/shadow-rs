@@ -17,7 +17,7 @@ use uucore::error::{UError, UResult};
 use shadow_core::group::{self};
 use shadow_core::gshadow::{self};
 use shadow_core::lock::FileLock;
-use shadow_core::passwd::PasswdEntry;
+use shadow_core::passwd::{self, PasswdEntry};
 use shadow_core::shadow::ShadowEntry;
 use shadow_core::sysroot::SysRoot;
 use shadow_core::{atomic, nscd};
@@ -94,8 +94,20 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         return Err(UserdelError::CantUpdatePasswd("Permission denied.".into()).into());
     }
 
-    // 1. Remove from /etc/passwd
+    // Read the user's home directory from /etc/passwd BEFORE removing the entry.
     let passwd_path = root.passwd_path();
+    let saved_home = if remove_home {
+        let entries = passwd::read_passwd_file(&passwd_path)
+            .map_err(|e| UserdelError::CantUpdatePasswd(format!("cannot read passwd: {e}")))?;
+        entries
+            .iter()
+            .find(|e| e.name == *login)
+            .map(|e| e.home.clone())
+    } else {
+        None
+    };
+
+    // 1. Remove from /etc/passwd
     remove_entry_from_file::<PasswdEntry>(&passwd_path, login, "passwd")
         .map_err(UserdelError::CantUpdatePasswd)?;
 
@@ -117,15 +129,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         let _ = remove_from_gshadow_members(&gshadow_path, login);
     }
 
-    // 5. Optionally remove home directory
+    // 5. Optionally remove home directory (using the path saved from passwd).
     if remove_home {
-        // Find home dir from the entry we just removed — read it before deletion.
-        // Actually we already removed it. For simplicity, construct from /home/LOGIN.
-        let home = root.resolve(&format!("/home/{login}"));
-        if home.exists() {
-            std::fs::remove_dir_all(&home).map_err(|e| {
-                UserdelError::CantRemoveHome(format!("cannot remove '{}': {e}", home.display()))
-            })?;
+        if let Some(ref home_dir) = saved_home {
+            if !home_dir.is_empty() {
+                let home = root.resolve(home_dir);
+                safe_remove_home(&home)?;
+            }
         }
 
         // Remove mail spool.
@@ -180,6 +190,74 @@ pub fn uu_app() -> Command {
                 .index(1)
                 .help("Login name of the user to delete"),
         )
+}
+
+// ---------------------------------------------------------------------------
+// Safe home directory removal
+// ---------------------------------------------------------------------------
+
+/// Directories that must never be removed, even if listed as a user's home.
+const PROTECTED_DIRS: &[&str] = &[
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt", "/opt",
+    "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+];
+
+/// Safely remove a home directory with multiple safeguards:
+/// - Refuse to remove protected system directories.
+/// - Refuse to follow symlinks at the top level.
+/// - Refuse to remove a mount point (different device than parent).
+fn safe_remove_home(home: &Path) -> Result<(), UserdelError> {
+    if !home.exists() {
+        return Ok(());
+    }
+
+    // Check against protected paths.
+    let canonical = home.to_str().unwrap_or("");
+    for &protected in PROTECTED_DIRS {
+        if canonical == protected {
+            return Err(UserdelError::CantRemoveHome(format!(
+                "refusing to remove protected directory '{}'",
+                home.display()
+            )));
+        }
+    }
+
+    // Refuse to follow symlinks at the top level.
+    let meta = std::fs::symlink_metadata(home).map_err(|e| {
+        UserdelError::CantRemoveHome(format!("cannot stat '{}': {e}", home.display()))
+    })?;
+
+    if meta.file_type().is_symlink() {
+        return Err(UserdelError::CantRemoveHome(format!(
+            "refusing to follow symlink at '{}'",
+            home.display()
+        )));
+    }
+
+    // Refuse to remove a mount point (device ID differs from parent).
+    if let Some(parent) = home.parent() {
+        if parent.exists() {
+            use std::os::unix::fs::MetadataExt;
+            let parent_meta = std::fs::metadata(parent).map_err(|e| {
+                UserdelError::CantRemoveHome(format!(
+                    "cannot stat parent of '{}': {e}",
+                    home.display()
+                ))
+            })?;
+            if meta.dev() != parent_meta.dev() {
+                return Err(UserdelError::CantRemoveHome(format!(
+                    "refusing to remove mount point at '{}'",
+                    home.display()
+                )));
+            }
+        }
+    }
+
+    std::fs::remove_dir_all(home).map_err(|e| {
+        UserdelError::CantRemoveHome(format!("cannot remove '{}': {e}", home.display()))
+    })?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
