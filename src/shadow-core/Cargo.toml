@@ -15,6 +15,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+landlock = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -30,6 +31,7 @@ group = []
 gshadow = []
 login-defs = []
 subid = []
+landlock = ["dep:landlock"]
 
 [lints]
 workspace = true

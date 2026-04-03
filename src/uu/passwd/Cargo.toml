@@ -18,7 +18,7 @@ path = "src/main.rs"
 clap = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
-shadow-core = { workspace = true, features = ["shadow", "login-defs"] }
+shadow-core = { workspace = true, features = ["shadow", "login-defs", "landlock"] }
 uucore = { workspace = true }
 
 [features]

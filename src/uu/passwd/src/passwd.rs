@@ -117,23 +117,23 @@ impl UError for PasswdError {
 
 /// Restrict filesystem access using landlock (Linux 5.13+).
 ///
-/// Best-effort: silently does nothing on kernels that don't support landlock.
+/// Best-effort Landlock sandboxing for passwd. Silently does nothing on
+/// kernels without Landlock support or when the feature is disabled.
+///
+/// Restricts filesystem access to only what passwd needs:
+/// read+write `/etc/` (passwd/shadow files) and `/dev/` (tty for prompts),
+/// execute `/usr/sbin/` (`nscd`/`sss_cache` invalidation).
 #[allow(unused_variables)]
 fn apply_landlock(root: &SysRoot) {
-    #[cfg(target_os = "linux")]
-    apply_landlock_inner(root);
-}
+    // Landlock is irreversible per-process, skip during tests
+    #[cfg(not(test))]
+    {
+        let etc = root.resolve("/etc");
+        let dev = Path::new("/dev");
+        let usr_sbin = Path::new("/usr/sbin");
 
-#[cfg(target_os = "linux")]
-fn apply_landlock_inner(_root: &SysRoot) {
-    // Landlock requires the landlock crate or raw syscalls.
-    // TODO(#41): Add landlock crate dependency and implement restriction.
-    //
-    // The restriction would be:
-    //   - /etc/ (read + write for passwd/shadow files)
-    //   - /dev/tty (read + write for password prompts)
-    //   - /usr/sbin/ (execute for nscd/sss_cache)
-    //   - deny everything else
+        shadow_core::hardening::apply_landlock(&[etc.as_path(), dev], &[], &[usr_sbin]);
+    }
 }
 
 // ---------------------------------------------------------------------------
