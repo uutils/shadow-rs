@@ -19,6 +19,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+subtle = { workspace = true }
 landlock = { workspace = true, optional = true }
 
 [dev-dependencies]

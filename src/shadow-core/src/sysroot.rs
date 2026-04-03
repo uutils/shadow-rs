@@ -9,7 +9,7 @@
 //! `--prefix DIR` prepends DIR to all file paths (no `chroot` syscall).
 //! `--root DIR` does an actual `chroot()` — paths are then relative to `/`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Resolves file paths relative to an optional prefix directory.
 #[derive(Debug, Clone)]
@@ -34,7 +34,14 @@ impl SysRoot {
     #[must_use]
     pub fn resolve(&self, relative: &str) -> PathBuf {
         let stripped = relative.strip_prefix('/').unwrap_or(relative);
-        self.prefix.join(stripped)
+        let joined = self.prefix.join(stripped);
+        // Reject path traversal: ".." components could escape the prefix.
+        for component in joined.components() {
+            if matches!(component, Component::ParentDir) {
+                return self.prefix.clone();
+            }
+        }
+        joined
     }
 
     /// Path to `/etc/passwd`.
@@ -128,5 +135,16 @@ mod tests {
             PathBuf::from("/mnt/etc/shadow")
         );
         assert_eq!(root.resolve("etc/shadow"), PathBuf::from("/mnt/etc/shadow"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_path_traversal() {
+        let root = SysRoot::new(Some(Path::new("/mnt/chroot")));
+        // Attempting to escape the prefix via ".." should return the prefix itself.
+        assert_eq!(root.resolve("/../etc/shadow"), PathBuf::from("/mnt/chroot"));
+        assert_eq!(
+            root.resolve("/home/../../etc/shadow"),
+            PathBuf::from("/mnt/chroot")
+        );
     }
 }

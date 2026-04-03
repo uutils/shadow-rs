@@ -100,13 +100,23 @@ fn get_current_gid() -> Result<u32, NewgrpError> {
     }
 }
 
-/// Determine the shell to exec. Uses `$SHELL` if set and non-empty,
-/// otherwise falls back to `/bin/sh`.
-fn get_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_string())
+/// Determine the shell to exec from the user's passwd entry.
+///
+/// Reads the shell field from `/etc/passwd` for the given UID rather
+/// than trusting `$SHELL`, which is attacker-controlled in a
+/// setuid-root context.
+fn get_shell(uid: nix::unistd::Uid) -> String {
+    match nix::unistd::User::from_uid(uid) {
+        Ok(Some(user)) => {
+            let shell = user.shell.to_string_lossy().to_string();
+            if shell.is_empty() {
+                "/bin/sh".to_string()
+            } else {
+                shell
+            }
+        }
+        _ => "/bin/sh".to_string(),
+    }
 }
 
 /// Check if the user is a member of the group (either as primary GID
@@ -171,7 +181,10 @@ impl Drop for EchoGuard {
 }
 
 /// Read a password from `/dev/tty` with echo disabled.
-fn read_password(prompt: &str) -> Result<String, NewgrpError> {
+///
+/// The returned password is wrapped in `Zeroizing` to ensure it is
+/// scrubbed from memory when dropped.
+fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<String>, NewgrpError> {
     use std::io::{BufRead, Write};
 
     let tty = std::fs::File::options()
@@ -196,7 +209,7 @@ fn read_password(prompt: &str) -> Result<String, NewgrpError> {
     // Disable echo; restored automatically on drop.
     let guard = EchoGuard::disable(tty_for_guard)?;
 
-    let mut buf = String::new();
+    let mut buf = zeroize::Zeroizing::new(String::new());
     let mut reader = std::io::BufReader::new(&tty);
     reader
         .read_line(&mut buf)
@@ -206,7 +219,9 @@ fn read_password(prompt: &str) -> Result<String, NewgrpError> {
     drop(guard);
     let _ = (&tty).write_all(b"\n");
 
-    Ok(buf.trim_end_matches('\n').to_string())
+    Ok(zeroize::Zeroizing::new(
+        buf.trim_end_matches('\n').to_string(),
+    ))
 }
 
 /// Verify a password against a crypt(3) hash.
@@ -300,8 +315,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             .map_err(|e| NewgrpError::Error(format!("cannot drop privileges: {e}")))?;
     }
 
-    // Exec the user's shell.
-    let shell = get_shell();
+    // Exec the user's shell (from passwd entry, not $SHELL).
+    let shell = get_shell(real_uid);
     let shell_cstr = CString::new(shell.as_str())
         .map_err(|_| NewgrpError::Error("invalid shell path".into()))?;
 
@@ -455,7 +470,8 @@ mod tests {
     #[test]
     fn test_get_shell_default() {
         // This test is environment-dependent but should at least not panic.
-        let shell = get_shell();
+        let uid = nix::unistd::getuid();
+        let shell = get_shell(uid);
         assert!(!shell.is_empty());
     }
 }

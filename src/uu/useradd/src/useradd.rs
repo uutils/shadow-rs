@@ -575,11 +575,7 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_passwd_entry(&passwd_path, &passwd_entries, &passwd_entry)?;
 
-    // Release locks now that passwd and group writes are complete.
-    drop(group_lock);
-    drop(passwd_lock);
-
-    // Step 13: Write /etc/shadow entry.
+    // Step 13: Write /etc/shadow entry (passwd+group locks still held).
     let shadow_path = opts.root.shadow_path();
     let shadow_entry = ShadowEntry {
         name: opts.login.clone(),
@@ -594,27 +590,21 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_shadow_entry(&shadow_path, &shadow_entry)?;
 
+    // Release locks now that passwd, group, and shadow writes are complete.
+    drop(group_lock);
+    drop(passwd_lock);
+
     // Step 14: Allocate subordinate UID/GID ranges for rootless containers.
     // Only done when the relevant file exists (matching GNU shadow-utils behavior).
     let subuid_path = opts.root.subuid_path();
     if subuid_path.exists()
-        && let Err(e) = append_subid_entry(
-            &subuid_path,
-            &opts.login,
-            100_000 + u64::from(uid) * 65_536,
-            65_536,
-        )
+        && let Err(e) = append_subid_entry(&subuid_path, &opts.login, 65_536)
     {
         uucore::show_error!("warning: failed to add subordinate UID range: {e}");
     }
     let subgid_path = opts.root.subgid_path();
     if subgid_path.exists()
-        && let Err(e) = append_subid_entry(
-            &subgid_path,
-            &opts.login,
-            100_000 + u64::from(gid) * 65_536,
-            65_536,
-        )
+        && let Err(e) = append_subid_entry(&subgid_path, &opts.login, 65_536)
     {
         uucore::show_error!("warning: failed to add subordinate GID range: {e}");
     }
@@ -869,7 +859,7 @@ fn add_to_supplementary_groups(
 ///
 /// Skips the write if the user already has an entry in the file.
 /// Uses file locking and atomic writes for crash safety.
-fn append_subid_entry(path: &Path, name: &str, start: u64, count: u64) -> UResult<()> {
+fn append_subid_entry(path: &Path, name: &str, count: u64) -> UResult<()> {
     use shadow_core::subid::{self, SubIdEntry};
 
     let lock = FileLock::acquire(path).map_err(|e| {
@@ -893,6 +883,14 @@ fn append_subid_entry(path: &Path, name: &str, start: u64, count: u64) -> UResul
         drop(lock);
         return Ok(());
     }
+
+    // Find next available range by starting after the highest existing end.
+    // This prevents overlapping ranges that could allow container escape.
+    let start = entries
+        .iter()
+        .map(|e| e.start.saturating_add(e.count))
+        .max()
+        .unwrap_or(100_000);
 
     entries.push(SubIdEntry {
         name: name.to_string(),

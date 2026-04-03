@@ -141,6 +141,8 @@ impl PwckOptions {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let _clean_env = shadow_core::hardening::harden_process();
+
     let matches = uu_app().try_get_matches_from(args)?;
     let opts = PwckOptions::from_matches(&matches);
     run_checks(&opts)

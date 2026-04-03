@@ -10,6 +10,8 @@
 
 use std::ffi::CString;
 
+use subtle::ConstantTimeEq;
+
 use crate::error::ShadowError;
 
 #[link(name = "crypt")]
@@ -43,5 +45,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, ShadowError> 
     let result_str = unsafe { std::ffi::CStr::from_ptr(result) };
     let result_str = result_str.to_str().unwrap_or("");
 
-    Ok(result_str == hash)
+    // Constant-time comparison prevents timing side-channel attacks
+    // that could leak password hash information.
+    Ok(result_str.as_bytes().ct_eq(hash.as_bytes()).into())
 }

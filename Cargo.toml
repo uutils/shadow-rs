@@ -64,6 +64,7 @@ libc = "0.2"
 
 # Security
 zeroize = "1"
+subtle = "2"
 landlock = "0.4"
 
 # Testing
