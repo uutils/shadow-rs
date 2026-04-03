@@ -453,4 +453,6 @@ fn test_set_password_preserves_other_fields() {
     assert_eq!(fields[5], "14", "warn_days should be preserved");
     assert_eq!(fields[6], "30", "inactive_days should be preserved");
     assert_eq!(fields[7], "20000", "expire_date should be preserved");
+    assert_eq!(fields.len(), 9, "shadow entry should have exactly 9 fields");
+    assert_eq!(fields[8], "", "reserved field should be empty");
 }

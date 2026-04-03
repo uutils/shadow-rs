@@ -106,6 +106,15 @@ impl ShadowEntry {
     }
 }
 
+/// Current date as days since Unix epoch, for `last_change` updates.
+pub fn days_since_epoch() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    secs / 86400
+}
+
 /// Parse an optional numeric field — empty string becomes `None`.
 fn parse_optional_field(field: &str) -> Result<Option<i64>, ShadowError> {
     if field.is_empty() {

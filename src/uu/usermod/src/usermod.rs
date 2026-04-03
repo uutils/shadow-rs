@@ -171,6 +171,15 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let inactive = matches.get_one::<i64>(options::INACTIVE);
     let new_password = matches.get_one::<String>(options::PASSWORD);
 
+    if let Some(pw) = new_password
+        && pw.contains([':', '\n', '\r'])
+    {
+        return Err(UsermodError::CantUpdate(
+            "invalid password hash: must not contain ':', '\\n', or '\\r'".into(),
+        )
+        .into());
+    }
+
     let login_changing = new_login.is_some();
     if shadow_path.exists()
         && (do_lock
@@ -186,34 +195,40 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         let mut se = shadow::read_shadow_file(&shadow_path)
             .map_err(|e| UsermodError::CantUpdate(format!("{e}")))?;
 
-        if let Some(s) = se.iter_mut().find(|e| e.name == *login) {
-            if do_lock {
-                s.lock();
-            }
-            if do_unlock {
-                s.unlock();
-            }
-            if let Some(exp) = expire {
-                s.expire_date = if exp == "-1" || exp.is_empty() {
-                    None
-                } else {
-                    Some(exp.parse::<i64>().map_err(|_| {
-                        UsermodError::CantUpdate(format!(
-                            "invalid expire date '{exp}' (expected days since epoch)"
-                        ))
-                    })?)
-                };
-            }
-            if let Some(&i) = inactive {
-                s.inactive_days = if i < 0 { None } else { Some(i) };
-            }
-            if let Some(pw) = new_password {
-                s.passwd.clone_from(pw);
-                s.last_change = Some(days_since_epoch());
-            }
-            if let Some(new_name) = new_login {
-                s.name.clone_from(new_name);
-            }
+        let Some(s) = se.iter_mut().find(|e| e.name == *login) else {
+            drop(slock);
+            return Err(UsermodError::CantUpdate(format!(
+                "user '{login}' not found in shadow file"
+            ))
+            .into());
+        };
+
+        if do_lock {
+            s.lock();
+        }
+        if do_unlock {
+            s.unlock();
+        }
+        if let Some(exp) = expire {
+            s.expire_date = if exp == "-1" || exp.is_empty() {
+                None
+            } else {
+                Some(exp.parse::<i64>().map_err(|_| {
+                    UsermodError::CantUpdate(format!(
+                        "invalid expire date '{exp}' (expected days since epoch)"
+                    ))
+                })?)
+            };
+        }
+        if let Some(&i) = inactive {
+            s.inactive_days = if i < 0 { None } else { Some(i) };
+        }
+        if let Some(pw) = new_password {
+            s.passwd.clone_from(pw);
+            s.last_change = Some(shadow::days_since_epoch());
+        }
+        if let Some(new_name) = new_login {
+            s.name.clone_from(new_name);
         }
 
         atomic::atomic_write(&shadow_path, |f| shadow::write_shadow(&se, f))
@@ -296,14 +311,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     audit::log_user_event("MOD_USER", login, new_uid, true);
 
     Ok(())
-}
-
-fn days_since_epoch() -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
-    now / 86400
 }
 
 /// Recursively chown all files and directories under `path` that are owned by
