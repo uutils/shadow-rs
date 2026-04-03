@@ -26,9 +26,12 @@ multiple-versions = "deny"
 wildcards = "allow"
 highlight = "all"
 
-# Known duplicate dependencies (uucore pulls in older versions of some crates).
-# Update this list when bumping uucore.
-skip = []
+# Known duplicate dependencies from transitive deps.
+# Update this list when bumping clap/uucore.
+skip = [
+    # clap -> terminal_size (0.60) vs clap -> anstyle-query (0.61)
+    { crate = "windows-sys@0.60", reason = "transitive clap dep, Linux-only project" },
+]
 
 [sources]
 unknown-registry = "warn"

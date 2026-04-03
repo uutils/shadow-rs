@@ -44,6 +44,7 @@ shadow-core = { path = "src/shadow-core" }
 
 # CLI
 clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
 
 # uutils integration
 uucore = "0.7"
@@ -57,12 +58,16 @@ libc = "0.2"
 
 # Security
 zeroize = "1"
+landlock = "0.4"
 
 # Testing
 proptest = "1"
 tempfile = "3"
 
 [dependencies]
+clap = { workspace = true }
+clap_complete = { workspace = true, optional = true }
+
 # Tool crates (optional, enabled by features)
 passwd = { optional = true, version = "0.0.1", package = "uu_passwd", path = "src/uu/passwd" }
 pwck = { optional = true, version = "0.0.1", package = "uu_pwck", path = "src/uu/pwck" }
@@ -105,9 +110,17 @@ feat_phase2 = ["feat_useradd", "feat_userdel", "feat_usermod", "feat_chpasswd", 
 feat_phase3 = ["feat_groupadd", "feat_groupdel", "feat_groupmod", "feat_grpck", "feat_chfn", "feat_chsh", "feat_newgrp"]
 feat_common = ["feat_phase1", "feat_phase2"]
 
+# Shell completions generator
+completions = ["dep:clap_complete"]
+
 [[bin]]
 name = "shadow-rs"
 path = "src/bin/shadow-rs.rs"
+
+[[bin]]
+name = "shadow-rs-completions"
+path = "src/bin/completions.rs"
+required-features = ["completions"]
 
 [[test]]
 name = "test_chage"

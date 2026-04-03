@@ -2,37 +2,27 @@
 # Generate shell completions for all shadow-rs tools.
 #
 # Usage:
-#   ./util/generate-completions.sh bash
-#   ./util/generate-completions.sh zsh
-#   ./util/generate-completions.sh fish
+#   ./util/generate-completions.sh bash [output-dir]
+#   ./util/generate-completions.sh zsh  [output-dir]
+#   ./util/generate-completions.sh fish [output-dir]
 #
-# For proper clap-based completions, build with clap_complete.
-# This is a minimal placeholder until clap_complete is integrated.
+# Requires: cargo build --features completions
 
 set -euo pipefail
 
 SHELL_TYPE="${1:-bash}"
-TOOLS="passwd pwck useradd userdel usermod chpasswd chage groupadd groupdel groupmod grpck chfn chsh newgrp"
+OUTPUT_DIR="${2:-}"
 
-case "$SHELL_TYPE" in
-  bash)
-    for tool in $TOOLS; do
-      echo "complete -W '--help' $tool"
-    done
-    ;;
-  zsh)
-    echo "#compdef shadow-rs"
-    for tool in $TOOLS; do
-      echo "complete -c $tool -s h -l help -d 'Show help'"
-    done
-    ;;
-  fish)
-    for tool in $TOOLS; do
-      echo "complete -c $tool -s h -l help -d 'Show help'"
-    done
-    ;;
-  *)
-    echo "Usage: $0 {bash|zsh|fish}" >&2
-    exit 1
-    ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Build the completions binary
+cargo build --manifest-path "$PROJECT_DIR/Cargo.toml" --features completions --bin shadow-rs-completions
+
+BINARY="$PROJECT_DIR/target/debug/shadow-rs-completions"
+
+if [ -n "$OUTPUT_DIR" ]; then
+    "$BINARY" --all --shell "$SHELL_TYPE" --dir "$OUTPUT_DIR"
+else
+    "$BINARY" --all --shell "$SHELL_TYPE"
+fi
