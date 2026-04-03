@@ -72,6 +72,8 @@ impl UError for UserdelError {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let _ = shadow_core::hardening::harden_process();
+
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
         Err(e) => {
@@ -83,9 +85,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     };
 
-    let login = matches
-        .get_one::<String>(options::LOGIN)
-        .expect("LOGIN is required");
+    let Some(login) = matches.get_one::<String>(options::LOGIN) else {
+        return Err(UserdelError::AlreadyPrinted(exit_codes::INVALID_SYNTAX).into());
+    };
     let remove_home = matches.get_flag(options::REMOVE);
     let prefix = matches
         .get_one::<String>(options::PREFIX)
@@ -263,8 +265,8 @@ fn safe_remove_home(home: &Path) -> Result<(), UserdelError> {
         }
     }
 
-    std::fs::remove_dir_all(home).map_err(|e| {
-        UserdelError::CantRemoveHome(format!("cannot remove '{}': {e}", home.display()))
+    std::fs::remove_dir_all(&canonical).map_err(|e| {
+        UserdelError::CantRemoveHome(format!("cannot remove '{}': {e}", canonical.display()))
     })?;
 
     Ok(())

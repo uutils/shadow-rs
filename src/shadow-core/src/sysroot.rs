@@ -9,7 +9,7 @@
 //! `--prefix DIR` prepends DIR to all file paths (no `chroot` syscall).
 //! `--root DIR` does an actual `chroot()` — paths are then relative to `/`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Resolves file paths relative to an optional prefix directory.
 #[derive(Debug, Clone)]
@@ -31,10 +31,28 @@ impl SysRoot {
     /// Resolve a path relative to the prefix.
     ///
     /// Strips leading `/` from `relative` before joining with the prefix.
+    /// Returns `None` if the path contains `..` components (path traversal).
+    pub fn try_resolve(&self, relative: &str) -> Option<PathBuf> {
+        let stripped = relative.strip_prefix('/').unwrap_or(relative);
+        let joined = self.prefix.join(stripped);
+        // Reject path traversal: ".." components could escape the prefix.
+        for component in joined.components() {
+            if matches!(component, Component::ParentDir) {
+                return None;
+            }
+        }
+        Some(joined)
+    }
+
+    /// Resolve a path relative to the prefix.
+    ///
+    /// Strips leading `/` from `relative` before joining with the prefix.
+    /// Only for hardcoded paths — use [`try_resolve`] for user-controlled input.
     #[must_use]
     pub fn resolve(&self, relative: &str) -> PathBuf {
-        let stripped = relative.strip_prefix('/').unwrap_or(relative);
-        self.prefix.join(stripped)
+        // All callers pass hardcoded paths like "/etc/passwd" — never ".."
+        self.try_resolve(relative)
+            .unwrap_or_else(|| unreachable!("resolve() called with path traversal: {relative:?}"))
     }
 
     /// Path to `/etc/passwd`.
@@ -128,5 +146,22 @@ mod tests {
             PathBuf::from("/mnt/etc/shadow")
         );
         assert_eq!(root.resolve("etc/shadow"), PathBuf::from("/mnt/etc/shadow"));
+    }
+
+    #[test]
+    fn test_try_resolve_rejects_path_traversal() {
+        let root = SysRoot::new(Some(Path::new("/mnt/chroot")));
+        // Attempting to escape the prefix via ".." returns None.
+        assert_eq!(root.try_resolve("/../etc/shadow"), None);
+        assert_eq!(root.try_resolve("/home/../../etc/shadow"), None);
+    }
+
+    #[test]
+    fn test_try_resolve_accepts_valid_paths() {
+        let root = SysRoot::new(Some(Path::new("/mnt/chroot")));
+        assert_eq!(
+            root.try_resolve("/etc/shadow"),
+            Some(PathBuf::from("/mnt/chroot/etc/shadow"))
+        );
     }
 }

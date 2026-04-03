@@ -76,6 +76,8 @@ impl UError for UsermodError {
 #[uucore::main]
 #[allow(clippy::too_many_lines)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+    let _ = shadow_core::hardening::harden_process();
+
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
         Err(e) => {
@@ -87,9 +89,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     };
 
-    let login = matches
-        .get_one::<String>(options::USER)
-        .expect("USER is required");
+    let Some(login) = matches.get_one::<String>(options::USER) else {
+        return Err(UsermodError::AlreadyPrinted(2).into());
+    };
     let prefix = matches
         .get_one::<String>(options::PREFIX)
         .or_else(|| matches.get_one::<String>(options::ROOT))
