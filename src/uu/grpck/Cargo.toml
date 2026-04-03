@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "grpck command (shadow-rs)"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "grpck ~ (shadow-rs) verify integrity of group files"
 
 [lib]
 path = "src/grpck.rs"

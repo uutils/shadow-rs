@@ -16,8 +16,8 @@
 //! Supported shells: bash, zsh, fish, elvish, powershell
 
 use clap::{Arg, ArgAction, Command};
-use clap_complete::generate;
 use clap_complete::Shell;
+use clap_complete::generate;
 use std::io;
 
 fn get_tool_app(name: &str) -> Option<Command> {

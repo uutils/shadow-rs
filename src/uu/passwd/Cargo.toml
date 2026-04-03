@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "passwd command — change user password (shadow-rs)"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "passwd ~ (shadow-rs) change user password"
 
 [lib]
 path = "src/passwd.rs"

@@ -3,13 +3,15 @@
 [package]
 name = "shadow-rs"
 version = "0.0.1"
-edition = "2021"
-license = "MIT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Memory-safe Rust reimplementation of Linux shadow-utils"
-repository = "https://github.com/shadow-utils-rs/shadow-rs"
 readme = "README.md"
-keywords = ["coreutils", "shadow", "passwd", "useradd", "linux"]
-categories = ["command-line-utilities", "os::unix-apis"]
+keywords = ["shadow-utils", "uutils", "shadow", "passwd", "linux"]
+categories = ["command-line-utilities"]
 
 [workspace]
 members = [
@@ -37,6 +39,9 @@ rust-version = "1.94.0"
 license = "MIT"
 authors = ["shadow-rs contributors"]
 repository = "https://github.com/shadow-utils-rs/shadow-rs"
+homepage = "https://github.com/shadow-utils-rs/shadow-rs"
+keywords = ["shadow-utils", "uutils", "shadow", "passwd", "linux"]
+categories = ["command-line-utilities"]
 
 [workspace.dependencies]
 # Internal crates
@@ -109,6 +114,7 @@ feat_phase1 = ["feat_passwd", "feat_pwck"]
 feat_phase2 = ["feat_useradd", "feat_userdel", "feat_usermod", "feat_chpasswd", "feat_chage"]
 feat_phase3 = ["feat_groupadd", "feat_groupdel", "feat_groupmod", "feat_grpck", "feat_chfn", "feat_chsh", "feat_newgrp"]
 feat_common = ["feat_phase1", "feat_phase2"]
+feat_common_core = ["feat_phase1", "feat_phase2", "feat_phase3"]
 
 # PAM authentication (requires libpam-dev)
 pam = ["passwd/pam"]

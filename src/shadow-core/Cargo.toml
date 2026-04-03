@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Core library for shadow-rs: parsers, atomic file ops, locking, PAM integration"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "shadow-core ~ (shadow-rs) parsers, atomic file ops, locking, PAM"
 
 [lib]
 path = "src/lib.rs"

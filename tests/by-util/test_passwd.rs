@@ -428,15 +428,15 @@ fn test_gnu_compat_status_output() {
 
     // Verify our format matches by parsing a shadow entry and formatting it
     let shadow_path = std::path::Path::new("/etc/shadow");
-    if let Ok(entries) = shadow_core::shadow::read_shadow_file(shadow_path) {
-        if let Some(entry) = entries.iter().find(|e| e.name == "root") {
-            let our_status = entry.status_char();
-            assert_eq!(
-                our_status, gnu_fields[1],
-                "status char mismatch: ours={our_status}, GNU={}",
-                gnu_fields[1]
-            );
-        }
+    if let Ok(entries) = shadow_core::shadow::read_shadow_file(shadow_path)
+        && let Some(entry) = entries.iter().find(|e| e.name == "root")
+    {
+        let our_status = entry.status_char();
+        assert_eq!(
+            our_status, gnu_fields[1],
+            "status char mismatch: ours={our_status}, GNU={}",
+            gnu_fields[1]
+        );
     }
 }
 

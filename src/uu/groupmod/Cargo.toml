@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "groupmod command (shadow-rs)"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "groupmod ~ (shadow-rs) modify a group"
 
 [lib]
 path = "src/groupmod.rs"

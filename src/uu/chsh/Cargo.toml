@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "chsh command (shadow-rs)"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "chsh ~ (shadow-rs) change user login shell"
 
 [lib]
 path = "src/chsh.rs"
