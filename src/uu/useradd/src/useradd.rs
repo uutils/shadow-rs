@@ -259,14 +259,11 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-/// Current date as days since epoch.
-#[allow(clippy::cast_possible_wrap)]
-fn today_days_since_epoch() -> i64 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    (secs / 86400) as i64
+/// Current date as days since epoch — delegates to shadow-core.
+fn today_days_since_epoch() -> Result<i64, UseraddError> {
+    shadow_core::shadow::days_since_epoch().map_err(|e| {
+        UseraddError::CannotUpdatePasswd(format!("cannot determine current date: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +577,7 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     let shadow_entry = ShadowEntry {
         name: opts.login.clone(),
         passwd: opts.password.clone(),
-        last_change: Some(today_days_since_epoch()),
+        last_change: Some(today_days_since_epoch()?),
         min_age: defs.get_i64("PASS_MIN_DAYS").or(Some(0)),
         max_age: defs.get_i64("PASS_MAX_DAYS").or(Some(99999)),
         warn_days: defs.get_i64("PASS_WARN_AGE").or(Some(7)),

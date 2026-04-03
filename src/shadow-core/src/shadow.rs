@@ -107,12 +107,16 @@ impl ShadowEntry {
 }
 
 /// Current date as days since Unix epoch, for `last_change` updates.
-pub fn days_since_epoch() -> i64 {
+///
+/// # Errors
+///
+/// Returns `ShadowError` if the system clock is before the Unix epoch.
+pub fn days_since_epoch() -> Result<i64, ShadowError> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
-    secs / 86400
+        .map_err(|_| ShadowError::Parse("system clock is before Unix epoch".into()))?;
+    let secs = i64::try_from(secs.as_secs()).unwrap_or(i64::MAX);
+    Ok(secs / 86400)
 }
 
 /// Parse an optional numeric field — empty string becomes `None`.

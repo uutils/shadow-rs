@@ -190,12 +190,10 @@ fn read_pairs_from_stdin() -> Result<Vec<PasswordPair>, ChpasswdError> {
 }
 
 /// Compute the current day since epoch (for `last_change` field).
-fn days_since_epoch() -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
-    now / 86400
+fn days_since_epoch() -> Result<i64, ChpasswdError> {
+    shadow_core::shadow::days_since_epoch().map_err(|e| {
+        ChpasswdError::UnexpectedFailure(format!("cannot determine current date: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -231,28 +229,24 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     let is_encrypted = matches.get_flag(options::ENCRYPTED);
-    let _use_md5 = matches.get_flag(options::MD5);
-    let _crypt_method = matches.get_one::<String>(options::CRYPT_METHOD);
-    let _sha_rounds = matches.get_one::<i64>(options::SHA_ROUNDS);
+    let use_md5 = matches.get_flag(options::MD5);
+    let crypt_method = matches.get_one::<String>(options::CRYPT_METHOD);
+    let sha_rounds = matches.get_one::<i64>(options::SHA_ROUNDS);
 
-    // Hashing support: only pre-encrypted mode (-e) is currently supported.
-    // For non-encrypted mode, we would need libc::crypt or a pure-Rust
-    // implementation. For now, give a clear error.
-    if !is_encrypted {
-        return Err(ChpasswdError::UnexpectedFailure(
-            "plaintext password hashing is not yet implemented; \
-             use -e/--encrypted with pre-hashed passwords, \
-             or pipe through 'openssl passwd -6' first"
-                .into(),
-        )
-        .into());
-    }
+    // Determine the hashing method for plaintext mode.
+    let hash_config = if is_encrypted {
+        None
+    } else {
+        let method = resolve_crypt_method(crypt_method.map(String::as_str), use_md5)?;
+        let rounds = sha_rounds.and_then(|&r| u32::try_from(r).ok());
+        Some((method, rounds))
+    };
 
     // Read all pairs from stdin before acquiring locks.
     let pairs = read_pairs_from_stdin()?;
 
     // Apply all password changes in a single locked transaction.
-    apply_password_changes(&root, &pairs)
+    apply_password_changes(&root, &pairs, hash_config.as_ref())
 }
 
 /// Build the clap `Command` for `chpasswd`.
@@ -306,7 +300,14 @@ pub fn uu_app() -> Command {
 // ---------------------------------------------------------------------------
 
 /// Apply all password changes to `/etc/shadow` in a single locked transaction.
-fn apply_password_changes(root: &SysRoot, pairs: &[PasswordPair]) -> UResult<()> {
+///
+/// When `hash_config` is `Some`, plaintext passwords are hashed via crypt(3).
+/// When `None`, passwords are assumed to be pre-encrypted (`-e` mode).
+fn apply_password_changes(
+    root: &SysRoot,
+    pairs: &[PasswordPair],
+    hash_config: Option<&(shadow_core::crypt::CryptMethod, Option<u32>)>,
+) -> UResult<()> {
     // Consolidate real + effective UID to root for file operations.
     if nix::unistd::geteuid().is_root() {
         let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
@@ -338,7 +339,7 @@ fn apply_password_changes(root: &SysRoot, pairs: &[PasswordPair]) -> UResult<()>
         }
     };
 
-    let today = days_since_epoch();
+    let today = days_since_epoch()?;
 
     // Apply each pair.
     for pair in pairs {
@@ -352,8 +353,19 @@ fn apply_password_changes(root: &SysRoot, pairs: &[PasswordPair]) -> UResult<()>
             .into());
         };
 
-        // Update the password hash and last_change date.
-        entry.passwd.clone_from(&*pair.password);
+        // Hash plaintext passwords or use pre-encrypted value directly.
+        let hash = if let Some((method, rounds)) = hash_config {
+            shadow_core::crypt::hash_password(&pair.password, *method, *rounds).map_err(|e| {
+                ChpasswdError::UnexpectedFailure(format!(
+                    "failed to hash password for '{}': {e}",
+                    pair.username
+                ))
+            })?
+        } else {
+            pair.password.to_string()
+        };
+
+        entry.passwd = hash;
         entry.last_change = Some(today);
     }
 
@@ -382,6 +394,30 @@ fn apply_password_changes(root: &SysRoot, pairs: &[PasswordPair]) -> UResult<()>
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Map `-c` / `-m` flags to a `CryptMethod`.
+fn resolve_crypt_method(
+    method: Option<&str>,
+    use_md5: bool,
+) -> Result<shadow_core::crypt::CryptMethod, ChpasswdError> {
+    use shadow_core::crypt::CryptMethod;
+
+    match method {
+        Some("SHA256") => Ok(CryptMethod::Sha256),
+        Some("SHA512") => Ok(CryptMethod::Sha512),
+        Some("YESCRYPT") => Ok(CryptMethod::Yescrypt),
+        Some("MD5" | "DES") => Err(ChpasswdError::UnexpectedFailure(
+            "MD5 and DES are insecure and not supported for plaintext hashing".into(),
+        )),
+        Some(other) => Err(ChpasswdError::UnexpectedFailure(format!(
+            "unknown crypt method: {other}"
+        ))),
+        None if use_md5 => Err(ChpasswdError::UnexpectedFailure(
+            "MD5 is insecure and not supported; use -c SHA512 instead".into(),
+        )),
+        None => Ok(CryptMethod::Sha512),
+    }
+}
 
 /// Check if the *real* caller is root (not just setuid-root).
 fn caller_is_root() -> bool {
@@ -607,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_days_since_epoch_reasonable() {
-        let days = days_since_epoch();
+        let days = days_since_epoch().expect("system clock should work in tests");
         // Should be at least 2024-01-01 (~19723 days) and less than 2100-01-01 (~47482 days).
         assert!(
             days > 19700,

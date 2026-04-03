@@ -227,7 +227,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
         if let Some(pw) = new_password {
             s.passwd.clone_from(pw);
-            s.last_change = Some(shadow::days_since_epoch());
+            s.last_change = Some(shadow::days_since_epoch().map_err(|e| {
+                UsermodError::CantUpdate(format!("cannot determine current date: {e}"))
+            })?);
         }
         if let Some(new_name) = new_login {
             s.name.clone_from(new_name);
