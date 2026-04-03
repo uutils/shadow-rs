@@ -106,8 +106,10 @@ pub fn hash_password(
         .to_str()
         .map_err(|_| ShadowError::Auth("crypt(3) returned invalid UTF-8".into()))?;
 
-    // crypt(3) returns "*0" or "*1" when the method is unsupported.
-    if hash.starts_with('*') {
+    // crypt(3) returns "*0"/"*1" for unsupported methods (glibc/libxcrypt).
+    // musl silently falls back to DES — detect by checking the method prefix.
+    let prefix = method.prefix();
+    if hash.starts_with('*') || !hash.starts_with(prefix) {
         return Err(ShadowError::Auth(
             format!("crypt(3) does not support {method:?} on this system").into(),
         ));
