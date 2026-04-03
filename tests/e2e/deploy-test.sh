@@ -36,7 +36,7 @@ assert_ok() {
         echo -e "  ${GREEN}✓${NC} $desc"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}✗${NC} $desc (command: $*)"
+        echo -e "  ${RED}✗${NC} $desc (command: $1)"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -113,7 +113,9 @@ preflight() {
     assert_ok "shadow-rs --list succeeds" "$BINDIR/shadow-rs" --list
 
     for tool in $TOOLS; do
-        assert_ok "symlink exists: $tool" test -L "$BINDIR/$tool" -o -x "$BINDIR/$tool"
+        assert_ok "symlink exists: $tool" test -L "$BINDIR/$tool"
+        assert_ok "symlink $tool resolves to shadow-rs" \
+            bash -c "readlink -f '$BINDIR/$tool' | grep -q 'shadow-rs'"
     done
 }
 
@@ -290,10 +292,12 @@ test_individual_tools() {
 
     # Set up test user for tool-specific tests
     userdel -r tooltest_user 2>/dev/null || true
-    useradd -m -s /bin/bash tooltest_user
+    assert_ok "useradd -m -s /bin/bash tooltest_user" \
+        useradd -m -s /bin/bash tooltest_user
     local hashed
     hashed=$(hash_password "ToolPass123")
-    bash -c "echo 'tooltest_user:$hashed' | chpasswd -e" || true
+    assert_ok "chpasswd -e sets tooltest_user password" \
+        bash -c "echo 'tooltest_user:$hashed' | chpasswd -e"
 
     # chage: set and query password aging
     assert_ok "chage -l tooltest_user" chage -l tooltest_user
@@ -335,10 +339,12 @@ test_pam_auth() {
 
     # Create PAM test user with pre-hashed password
     userdel -r pamtest_user 2>/dev/null || true
-    useradd -m -s /bin/bash pamtest_user
+    assert_ok "useradd -m -s /bin/bash pamtest_user" \
+        useradd -m -s /bin/bash pamtest_user
     local hashed
     hashed=$(hash_password "PamPass789")
-    bash -c "echo 'pamtest_user:$hashed' | chpasswd -e" || true
+    assert_ok "chpasswd -e sets pamtest_user password" \
+        bash -c "echo 'pamtest_user:$hashed' | chpasswd -e"
 
     # Use expect to test su authentication
     assert_ok "su with known password via expect" \
@@ -379,7 +385,7 @@ test_nscd() {
 
     # Start nscd (needs /var/run/nscd directory and /var/db/nscd)
     mkdir -p /var/run/nscd /var/db/nscd 2>/dev/null || true
-    nscd -d 2>/dev/null &
+    nscd -d >/dev/null 2>&1 &
     sleep 2
 
     if ! pgrep -x nscd >/dev/null 2>&1; then
@@ -392,12 +398,12 @@ test_nscd() {
 
     # Create user and verify getent picks it up
     userdel nscd_user 2>/dev/null || true
-    useradd -m nscd_user
+    assert_ok "useradd -m nscd_user" useradd -m nscd_user
     assert_contains "getent finds new user" "nscd_user" \
         getent passwd nscd_user
 
     # Delete user and verify getent no longer finds it
-    userdel -r nscd_user
+    assert_ok "userdel -r nscd_user" userdel -r nscd_user
     sleep 1
     assert_fail "getent no longer finds deleted user" \
         getent passwd nscd_user
@@ -420,7 +426,7 @@ test_landlock() {
 
         # passwd should work under Landlock restriction
         userdel -r landlock_user 2>/dev/null || true
-        useradd -m landlock_user
+        assert_ok "useradd -m landlock_user" useradd -m landlock_user
 
         assert_ok "passwd -S works under Landlock" \
             passwd -S landlock_user

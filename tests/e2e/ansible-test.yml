@@ -69,6 +69,7 @@
       ansible.builtin.shell: |
         echo "{{ test_user }}:$(openssl passwd -6 '{{ test_password }}')" | chpasswd -e
       changed_when: true
+      no_log: true
 
     - name: Modify user shell
       ansible.builtin.user:
