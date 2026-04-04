@@ -102,9 +102,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         return Err(UsermodError::CantUpdate("Permission denied.".into()).into());
     }
 
-    // Block signals for the duration of the critical section so a SIGINT
-    // between lock acquisition and atomic_write cannot leave stale lock files.
-    let _signals = shadow_core::hardening::SignalBlocker::block_critical()
+    // Block signals for the passwd lock→write critical section only.
+    // Dropped before recursive_chown so long-running operations remain interruptible.
+    let signals = shadow_core::hardening::SignalBlocker::block_critical()
         .map_err(|e| UsermodError::CantUpdate(format!("cannot block signals: {e}")))?;
 
     // Modify /etc/passwd.
@@ -158,6 +158,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     atomic::atomic_write(&passwd_path, |f| passwd::write_passwd(&entries, f))
         .map_err(|e| UsermodError::CantUpdate(format!("{e}")))?;
     drop(lock);
+
+    // Restore signals before potentially long-running recursive chown.
+    drop(signals);
 
     // If the UID changed and the home directory was not explicitly moved,
     // recursively chown the existing home directory to the new UID.

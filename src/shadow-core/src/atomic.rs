@@ -30,7 +30,10 @@ use crate::error::ShadowError;
 /// `umask(2)` is a process-wide operation. This guard is NOT safe to use
 /// from multiple threads concurrently. All shadow-rs tools are
 /// single-threaded, so this is not an issue in practice.
-struct UmaskGuard(nix::sys::stat::Mode, std::marker::PhantomData<*const ()>);
+struct UmaskGuard(
+    nix::sys::stat::Mode,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
 
 impl UmaskGuard {
     /// Set umask to zero and return a guard that restores the original.

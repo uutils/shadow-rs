@@ -475,10 +475,9 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     validate::validate_username(&opts.login)
         .map_err(|e| UseraddError::BadArgument(format!("{e}")))?;
 
-    // Step 2: Block signals for the duration of the critical section so a
-    // SIGINT between lock acquisition and atomic_write cannot leave stale
-    // lock files on disk.
-    let _signals = shadow_core::hardening::SignalBlocker::block_critical()
+    // Step 2: Block signals for the lock→write critical section only.
+    // Dropped after file writes complete so home creation remains interruptible.
+    let signals = shadow_core::hardening::SignalBlocker::block_critical()
         .map_err(|e| UseraddError::CannotUpdatePasswd(format!("cannot block signals: {e}")))?;
 
     // Acquire locks BEFORE reading so concurrent useradd cannot
@@ -588,9 +587,12 @@ fn do_useradd(opts: &UseraddOptions) -> UResult<()> {
     };
     write_shadow_entry(&shadow_path, &shadow_entry)?;
 
-    // Release locks now that passwd, group, and shadow writes are complete.
+    // Release locks and signal blocker now that passwd, group, and shadow writes are complete.
+    // Subsequent steps (subid, supplementary groups, home creation) are individually
+    // crash-safe and may be long-running, so signals should be interruptible.
     drop(group_lock);
     drop(passwd_lock);
+    drop(signals);
 
     // Step 14: Allocate subordinate UID/GID ranges for rootless containers.
     // Only done when the relevant file exists (matching GNU shadow-utils behavior).

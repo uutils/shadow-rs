@@ -118,9 +118,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         None
     };
 
-    // Block signals for the duration of the critical section so a SIGINT
-    // between lock acquisition and atomic_write cannot leave stale lock files.
-    let _signals = shadow_core::hardening::SignalBlocker::block_critical()
+    // Block signals for the file-modification critical section only.
+    // Dropped before home removal so long-running deletions remain interruptible.
+    let signals = shadow_core::hardening::SignalBlocker::block_critical()
         .map_err(|e| UserdelError::CantUpdatePasswd(format!("cannot block signals: {e}")))?;
 
     // 1. Remove from /etc/passwd
@@ -144,6 +144,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     if gshadow_path.exists() {
         let _ = remove_from_gshadow_members(&gshadow_path, login);
     }
+
+    // Restore signals before potentially long-running home removal.
+    drop(signals);
 
     // 5. Optionally remove home directory (using the path saved from passwd).
     if remove_home {

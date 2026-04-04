@@ -221,7 +221,10 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, NewgrpError> {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    let _clean_env = shadow_core::hardening::harden_process();
+    // newgrp execs a shell, so only suppress core dumps — do NOT raise
+    // RLIMIT_FSIZE as that would leak into the user's interactive session.
+    shadow_core::hardening::suppress_core_dumps();
+    let _clean_env = shadow_core::hardening::sanitized_env();
 
     let matches = match uu_app().try_get_matches_from(args) {
         Ok(m) => m,
