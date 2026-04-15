@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      # preinstalled tools https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
+      # pre-installed tools: https://github.com/actions/runner-images/blob/main/images/ubuntu/
       - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libselinux1-dev libaudit-dev libcrypt-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
