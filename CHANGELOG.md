@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cargo.toml metadata aligned with uutils ecosystem conventions
 - Tool crate descriptions normalized to `"tool ~ (shadow-rs) verb phrase"` format
 - Edition 2024 consistently applied across root and workspace packages
+- `make install` now defaults to 14 standalone per-tool binaries with
+  least-privilege setuid layout matching GNU shadow-utils (#138). Only
+  `passwd`/`chfn`/`chsh`/`newgrp` are setuid-root; the other 10 are `0755`.
+  The previous multicall install is available as `make install-multicall`.
 
 ### Fixed
 

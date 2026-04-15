@@ -85,6 +85,25 @@ docker compose build debian
 docker compose run --rm debian cargo build --release
 ```
 
+### Install
+
+Default install: 14 standalone per-tool binaries with least-privilege setuid
+layout matching GNU shadow-utils. Only `passwd`, `chfn`, `chsh`, `newgrp` are
+installed setuid-root; the other 10 are plain `0755`.
+
+```shell
+sudo make install PREFIX=/usr/local
+```
+
+Alternative: single multicall binary with symlinks. Smaller footprint (~14×
+disk savings) but larger setuid attack surface, since `chmod` on a setuid
+symlink follows through to the underlying ELF — all 14 tools end up running
+with `euid=root` when invoked. Intended for container/embedded use cases.
+
+```shell
+sudo make install-multicall PREFIX=/usr/local
+```
+
 ### Test
 
 All builds and tests run inside Docker containers to isolate from the host
