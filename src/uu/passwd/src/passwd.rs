@@ -9,6 +9,7 @@
 //! Drop-in replacement for GNU shadow-utils `passwd(1)`.
 
 use std::fmt;
+use std::io::Write as _;
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -444,6 +445,7 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> UResult<()> {
         }
     };
 
+    let mut out = std::io::stdout().lock();
     match target_user {
         Some(user) => {
             let Some(entry) = entries.iter().find(|e| e.name == user) else {
@@ -453,12 +455,12 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> UResult<()> {
                 ))
                 .into());
             };
-            println!("{}", format_status(entry));
+            let _ = writeln!(out, "{}", format_status(entry));
         }
         None => {
             // --all: show all users.
             for entry in &entries {
-                println!("{}", format_status(entry));
+                let _ = writeln!(out, "{}", format_status(entry));
             }
         }
     }
@@ -499,7 +501,8 @@ impl Drop for PrivDrop {
         if let Err(e) = nix::unistd::seteuid(self.original_euid) {
             // Failing to restore privileges is a critical error — log it loudly.
             // We can't return an error from Drop, so at least make it visible.
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "passwd: CRITICAL: failed to restore euid to {}: {e}",
                 self.original_euid
             );

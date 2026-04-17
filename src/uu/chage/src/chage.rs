@@ -9,6 +9,7 @@
 //! Drop-in replacement for GNU shadow-utils `chage(1)`.
 
 use std::fmt;
+use std::io::Write as _;
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -460,13 +461,23 @@ fn print_aging_info(entry: &ShadowEntry) {
         .warn_days
         .map_or_else(|| "-1".to_string(), |v| v.to_string());
 
-    println!("Last password change\t\t\t\t\t: {last_change}");
-    println!("Password expires\t\t\t\t\t: {password_expires}");
-    println!("Password inactive\t\t\t\t\t: {password_inactive}");
-    println!("Account expires\t\t\t\t\t\t: {account_expires}");
-    println!("Minimum number of days between password change\t\t: {min_days}");
-    println!("Maximum number of days between password change\t\t: {max_days}");
-    println!("Number of days of warning before password expires\t: {warn_days}");
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "Last password change\t\t\t\t\t: {last_change}");
+    let _ = writeln!(out, "Password expires\t\t\t\t\t: {password_expires}");
+    let _ = writeln!(out, "Password inactive\t\t\t\t\t: {password_inactive}");
+    let _ = writeln!(out, "Account expires\t\t\t\t\t\t: {account_expires}");
+    let _ = writeln!(
+        out,
+        "Minimum number of days between password change\t\t: {min_days}"
+    );
+    let _ = writeln!(
+        out,
+        "Maximum number of days between password change\t\t: {max_days}"
+    );
+    let _ = writeln!(
+        out,
+        "Number of days of warning before password expires\t: {warn_days}"
+    );
 }
 
 /// Compute the password expiry display string.

@@ -101,9 +101,9 @@ where
 
     // Determine permissions: preserve original if target exists, otherwise 0600.
     // Set mode at creation time to avoid any window where the file is world-readable.
-    let mode = fs::metadata(target)
-        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()))
-        .unwrap_or(0o600);
+    let mode = fs::metadata(target).map_or(0o600, |m| {
+        std::os::unix::fs::PermissionsExt::mode(&m.permissions())
+    });
 
     let mut guard = TmpGuard::new(tmp_path.clone());
 

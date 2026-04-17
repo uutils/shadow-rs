@@ -8,6 +8,7 @@
 //! Dispatches to the appropriate utility based on `argv[0]`.
 //! When invoked as `shadow-rs <util>`, uses the first argument instead.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -47,13 +48,25 @@ fn main() -> ExitCode {
             return to_exit_code(code);
         }
 
-        eprintln!("shadow-rs: unknown utility '{util_name}'");
-        eprintln!("Run 'shadow-rs --list' for available utilities.");
+        let _ = writeln!(
+            std::io::stderr(),
+            "shadow-rs: unknown utility '{util_name}'"
+        );
+        let _ = writeln!(
+            std::io::stderr(),
+            "Run 'shadow-rs --list' for available utilities."
+        );
         return ExitCode::FAILURE;
     }
 
-    eprintln!("Usage: shadow-rs <utility> [arguments...]");
-    eprintln!("Run 'shadow-rs --list' for available utilities.");
+    let _ = writeln!(
+        std::io::stderr(),
+        "Usage: shadow-rs <utility> [arguments...]"
+    );
+    let _ = writeln!(
+        std::io::stderr(),
+        "Run 'shadow-rs --list' for available utilities."
+    );
     ExitCode::FAILURE
 }
 
@@ -92,34 +105,35 @@ fn dispatch(name: &str, args: &[std::ffi::OsString]) -> Option<i32> {
 }
 
 fn print_available_utils() {
-    println!("Available utilities:");
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "Available utilities:");
 
     #[cfg(feature = "chage")]
-    println!("  chage");
+    let _ = writeln!(out, "  chage");
     #[cfg(feature = "chfn")]
-    println!("  chfn");
+    let _ = writeln!(out, "  chfn");
     #[cfg(feature = "chpasswd")]
-    println!("  chpasswd");
+    let _ = writeln!(out, "  chpasswd");
     #[cfg(feature = "chsh")]
-    println!("  chsh");
+    let _ = writeln!(out, "  chsh");
     #[cfg(feature = "groupadd")]
-    println!("  groupadd");
+    let _ = writeln!(out, "  groupadd");
     #[cfg(feature = "groupdel")]
-    println!("  groupdel");
+    let _ = writeln!(out, "  groupdel");
     #[cfg(feature = "groupmod")]
-    println!("  groupmod");
+    let _ = writeln!(out, "  groupmod");
     #[cfg(feature = "grpck")]
-    println!("  grpck");
+    let _ = writeln!(out, "  grpck");
     #[cfg(feature = "newgrp")]
-    println!("  newgrp");
+    let _ = writeln!(out, "  newgrp");
     #[cfg(feature = "passwd")]
-    println!("  passwd");
+    let _ = writeln!(out, "  passwd");
     #[cfg(feature = "pwck")]
-    println!("  pwck");
+    let _ = writeln!(out, "  pwck");
     #[cfg(feature = "useradd")]
-    println!("  useradd");
+    let _ = writeln!(out, "  useradd");
     #[cfg(feature = "userdel")]
-    println!("  userdel");
+    let _ = writeln!(out, "  userdel");
     #[cfg(feature = "usermod")]
-    println!("  usermod");
+    let _ = writeln!(out, "  usermod");
 }

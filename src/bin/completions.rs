@@ -19,6 +19,7 @@ use clap::{Arg, ArgAction, Command};
 use clap_complete::Shell;
 use clap_complete::generate;
 use std::io;
+use std::io::Write as _;
 
 fn get_tool_app(name: &str) -> Option<Command> {
     match name {
@@ -144,7 +145,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("{msg}");
+            let _ = writeln!(std::io::stderr(), "{msg}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -175,7 +176,11 @@ fn run() -> Result<(), String> {
                     generate(shell, &mut cmd, *name, &mut file);
                 }
             }
-            eprintln!("generated {} completions in {dir}/", tools.len());
+            let _ = writeln!(
+                std::io::stderr(),
+                "generated {} completions in {dir}/",
+                tools.len()
+            );
         } else {
             let stdout = io::stdout();
             let mut out = stdout.lock();

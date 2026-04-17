@@ -338,7 +338,10 @@ fn display_message(message: &PamMessage, _is_error: bool) {
     let text = unsafe { CStr::from_ptr(message.msg) };
     let text = text.to_string_lossy();
 
-    eprintln!("{text}");
+    {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{text}");
+    }
 }
 
 /// Prompt for user input (with or without echo) and return a `malloc`-allocated

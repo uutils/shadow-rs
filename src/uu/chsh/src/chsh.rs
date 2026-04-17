@@ -10,7 +10,7 @@
 //! Changes the login shell field in `/etc/passwd`.
 
 use std::fmt;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write as _};
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -264,8 +264,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         if shells.is_empty() {
             uucore::show_error!("no shells found in {}", root.shells_path().display());
         } else {
+            let mut out = io::stdout().lock();
             for shell in &shells {
-                println!("{shell}");
+                let _ = writeln!(out, "{shell}");
             }
         }
         return Ok(());

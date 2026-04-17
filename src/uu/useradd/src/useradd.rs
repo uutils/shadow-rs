@@ -14,6 +14,7 @@
 //! directory and populate it from `/etc/skel`.
 
 use std::fmt;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -320,13 +321,14 @@ fn cmd_defaults(_matches: &clap::ArgMatches) -> UResult<()> {
     let default_skel = defs.get("SKEL").unwrap_or("/etc/skel");
     let default_create_mail = defs.get("CREATE_MAIL_SPOOL").unwrap_or("no");
 
-    println!("GROUP=100");
-    println!("HOME={default_home}");
-    println!("INACTIVE={default_inactive}");
-    println!("EXPIRE={default_expire}");
-    println!("SHELL={default_shell}");
-    println!("SKEL={default_skel}");
-    println!("CREATE_MAIL_SPOOL={default_create_mail}");
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "GROUP=100");
+    let _ = writeln!(out, "HOME={default_home}");
+    let _ = writeln!(out, "INACTIVE={default_inactive}");
+    let _ = writeln!(out, "EXPIRE={default_expire}");
+    let _ = writeln!(out, "SHELL={default_shell}");
+    let _ = writeln!(out, "SKEL={default_skel}");
+    let _ = writeln!(out, "CREATE_MAIL_SPOOL={default_create_mail}");
 
     Ok(())
 }
