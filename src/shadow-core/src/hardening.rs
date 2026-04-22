@@ -142,26 +142,44 @@ pub fn current_username() -> Result<String, crate::error::ShadowError> {
     lookup_username_by_uid(uid)
 }
 
-/// Look up a username by UID from `/etc/passwd`.
+/// Look up a username by UID via NSS (`getpwuid_r`).
+///
+/// Uses the system name-service switch, so it works with LDAP, SSSD,
+/// systemd-homed, and other backends — not just `/etc/passwd`.
 pub fn lookup_username_by_uid(uid: u32) -> Result<String, crate::error::ShadowError> {
-    let entries = crate::passwd::read_passwd_file(std::path::Path::new("/etc/passwd"))?;
-    match entries.iter().find(|e| e.uid == uid) {
-        Some(entry) => Ok(entry.name.clone()),
-        None => Err(crate::error::ShadowError::Other(
+    match crate::process::lookup_username(uid) {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err(crate::error::ShadowError::Other(
             format!("cannot determine username for uid {uid}").into(),
+        )),
+        Err(e) => Err(crate::error::ShadowError::Other(
+            format!("NSS lookup failed for uid {uid}: {e}").into(),
         )),
     }
 }
 
-/// Look up a passwd entry by UID from `/etc/passwd`.
+/// Look up a passwd entry by UID via NSS (`getpwuid_r`).
+///
+/// Uses the system name-service switch, so it works with LDAP, SSSD,
+/// systemd-homed, and other backends — not just `/etc/passwd`.
 pub fn lookup_passwd_entry_by_uid(
     uid: u32,
 ) -> Result<crate::passwd::PasswdEntry, crate::error::ShadowError> {
-    let entries = crate::passwd::read_passwd_file(std::path::Path::new("/etc/passwd"))?;
-    match entries.into_iter().find(|e| e.uid == uid) {
-        Some(entry) => Ok(entry),
-        None => Err(crate::error::ShadowError::Other(
+    match crate::process::getpwuid(uid) {
+        Ok(Some(pw)) => Ok(crate::passwd::PasswdEntry {
+            name: pw.name,
+            passwd: pw.passwd,
+            uid: pw.uid,
+            gid: pw.gid,
+            gecos: pw.gecos,
+            home: pw.home,
+            shell: pw.shell,
+        }),
+        Ok(None) => Err(crate::error::ShadowError::Other(
             format!("no passwd entry for uid {uid}").into(),
+        )),
+        Err(e) => Err(crate::error::ShadowError::Other(
+            format!("NSS lookup failed for uid {uid}: {e}").into(),
         )),
     }
 }
