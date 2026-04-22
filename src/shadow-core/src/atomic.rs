@@ -30,16 +30,13 @@ use crate::error::ShadowError;
 /// `umask(2)` is a process-wide operation. This guard is NOT safe to use
 /// from multiple threads concurrently. All shadow-rs tools are
 /// single-threaded, so this is not an issue in practice.
-struct UmaskGuard(
-    nix::sys::stat::Mode,
-    std::marker::PhantomData<std::rc::Rc<()>>,
-);
+struct UmaskGuard(rustix::fs::Mode, std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl UmaskGuard {
     /// Set umask to zero and return a guard that restores the original.
     fn zero() -> Self {
         Self(
-            nix::sys::stat::umask(nix::sys::stat::Mode::empty()),
+            rustix::process::umask(rustix::fs::Mode::empty()),
             std::marker::PhantomData,
         )
     }
@@ -47,7 +44,7 @@ impl UmaskGuard {
 
 impl Drop for UmaskGuard {
     fn drop(&mut self) {
-        nix::sys::stat::umask(self.0);
+        rustix::process::umask(self.0);
     }
 }
 
@@ -151,7 +148,7 @@ where
     tmp_file
         .flush()
         .map_err(|e| ShadowError::IoPath(e, tmp_path.clone()))?;
-    nix::unistd::fsync(&tmp_file)
+    rustix::fs::fsync(&tmp_file)
         .map_err(|e| ShadowError::IoPath(io::Error::from(e), tmp_path.clone()))?;
 
     // Atomic rename.
@@ -162,7 +159,7 @@ where
 
     // Fsync the parent directory to ensure the rename is durable.
     if let Ok(dir_fd) = File::open(dir) {
-        let _ = nix::unistd::fsync(&dir_fd);
+        let _ = rustix::fs::fsync(&dir_fd);
     }
 
     Ok(())

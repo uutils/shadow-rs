@@ -70,14 +70,11 @@ impl UError for NewgrpError {
 
 /// Get the current user's primary GID from the real UID.
 fn get_current_gid() -> Result<u32, NewgrpError> {
-    let uid = nix::unistd::getuid();
-    match nix::unistd::User::from_uid(uid) {
-        Ok(Some(user)) => Ok(user.gid.as_raw()),
-        Ok(None) => Err(NewgrpError::Error(format!(
-            "cannot determine current user for uid {uid}"
-        ))),
+    let uid = rustix::process::getuid().as_raw();
+    match shadow_core::hardening::lookup_passwd_entry_by_uid(uid) {
+        Ok(entry) => Ok(entry.gid),
         Err(e) => Err(NewgrpError::Error(format!(
-            "cannot determine current user: {e}"
+            "cannot determine current user for uid {uid}: {e}"
         ))),
     }
 }
@@ -87,14 +84,13 @@ fn get_current_gid() -> Result<u32, NewgrpError> {
 /// Reads the shell field from `/etc/passwd` for the given UID rather
 /// than trusting `$SHELL`, which is attacker-controlled in a
 /// setuid-root context.
-fn get_shell(uid: nix::unistd::Uid) -> String {
-    match nix::unistd::User::from_uid(uid) {
-        Ok(Some(user)) => {
-            let shell = user.shell.to_string_lossy().to_string();
-            if shell.is_empty() {
+fn get_shell(uid: u32) -> String {
+    match shadow_core::hardening::lookup_passwd_entry_by_uid(uid) {
+        Ok(entry) => {
+            if entry.shell.is_empty() {
                 "/bin/sh".to_string()
             } else {
-                shell
+                entry.shell
             }
         }
         _ => "/bin/sh".to_string(),
@@ -127,7 +123,7 @@ fn group_has_password(gshadow_path: &Path, group_name: &str) -> Option<String> {
 /// RAII guard that restores terminal echo on drop.
 struct EchoGuard {
     tty: std::fs::File,
-    old_termios: nix::sys::termios::Termios,
+    old_termios: rustix::termios::Termios,
 }
 
 impl EchoGuard {
@@ -135,14 +131,14 @@ impl EchoGuard {
     fn disable(tty: std::fs::File) -> Result<Self, NewgrpError> {
         use std::os::unix::io::AsFd;
 
-        let old_termios = nix::sys::termios::tcgetattr(tty.as_fd())
+        let old_termios = rustix::termios::tcgetattr(tty.as_fd())
             .map_err(|e| NewgrpError::Error(format!("cannot get terminal attributes: {e}")))?;
 
         let mut new_termios = old_termios.clone();
-        new_termios.local_flags &= !nix::sys::termios::LocalFlags::ECHO;
-        nix::sys::termios::tcsetattr(
+        new_termios.local_modes &= !rustix::termios::LocalModes::ECHO;
+        rustix::termios::tcsetattr(
             tty.as_fd(),
-            nix::sys::termios::SetArg::TCSANOW,
+            rustix::termios::OptionalActions::Now,
             &new_termios,
         )
         .map_err(|e| NewgrpError::Error(format!("cannot disable echo: {e}")))?;
@@ -154,9 +150,9 @@ impl EchoGuard {
 impl Drop for EchoGuard {
     fn drop(&mut self) {
         use std::os::unix::io::AsFd;
-        let _ = nix::sys::termios::tcsetattr(
+        let _ = rustix::termios::tcsetattr(
             self.tty.as_fd(),
-            nix::sys::termios::SetArg::TCSANOW,
+            rustix::termios::OptionalActions::Now,
             &self.old_termios,
         );
     }
@@ -288,21 +284,20 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     // Set the new GID.
-    let gid = nix::unistd::Gid::from_raw(target_gid);
-    nix::unistd::setgid(gid)
+    shadow_core::process::setgid(target_gid)
         .map_err(|e| NewgrpError::Error(format!("cannot set group ID to {target_gid}: {e}")))?;
 
     // Reset supplementary groups. POSIX requires newgrp to reinitialize
     // the group list. Without this, the new shell inherits stale groups.
     let username_cstr = std::ffi::CString::new(username.as_str())
         .map_err(|_| NewgrpError::Error("invalid username".into()))?;
-    nix::unistd::initgroups(&username_cstr, gid)
+    shadow_core::process::initgroups(&username_cstr, target_gid)
         .map_err(|e| NewgrpError::Error(format!("cannot initialize groups: {e}")))?;
 
     // Drop back to the real UID (in case we are setuid-root).
-    let real_uid = nix::unistd::getuid();
-    if nix::unistd::geteuid() != real_uid {
-        nix::unistd::setuid(real_uid)
+    let real_uid = rustix::process::getuid().as_raw();
+    if rustix::process::geteuid().as_raw() != real_uid {
+        shadow_core::process::setuid(real_uid)
             .map_err(|e| NewgrpError::Error(format!("cannot drop privileges: {e}")))?;
     }
 
@@ -320,12 +315,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let login_cstr = CString::new(login_name.as_str())
         .map_err(|_| NewgrpError::Error("invalid shell name".into()))?;
 
-    // SAFETY: execv replaces the current process. The CStrings are valid
-    // and null-terminated. If execv fails, we return an error.
-    match nix::unistd::execv(&shell_cstr, &[login_cstr]) {
-        Ok(infallible) => match infallible {},
-        Err(e) => Err(NewgrpError::Error(format!("cannot exec {shell}: {e}")).into()),
-    }
+    // execv replaces the current process. If it fails, we return an error.
+    let err = shadow_core::process::execv(&shell_cstr, &[&login_cstr]);
+    Err(NewgrpError::Error(format!("cannot exec {shell}: {err}")).into())
 }
 
 /// Build the clap `Command` for `newgrp`.
@@ -461,7 +453,7 @@ mod tests {
     #[test]
     fn test_get_shell_default() {
         // This test is environment-dependent but should at least not panic.
-        let uid = nix::unistd::getuid();
+        let uid = rustix::process::getuid().as_raw();
         let shell = get_shell(uid);
         assert!(!shell.is_empty());
     }

@@ -80,10 +80,10 @@ fn do_chroot(dir: &str) -> Result<(), ChshError> {
     }
 
     let path = std::path::Path::new(dir);
-    nix::unistd::chroot(path)
+    rustix::process::chroot(path)
         .map_err(|e| ChshError::Error(format!("cannot chroot to '{dir}': {e}")))?;
 
-    nix::unistd::chdir("/")
+    rustix::process::chdir("/")
         .map_err(|e| ChshError::Error(format!("cannot chdir to / after chroot: {e}")))?;
 
     Ok(())
@@ -174,8 +174,8 @@ fn mutate_passwd<F>(root: &SysRoot, username: &str, mutate: F) -> UResult<()>
 where
     F: FnOnce(&mut PasswdEntry) -> Result<(), String>,
 {
-    if nix::unistd::geteuid().is_root() {
-        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
+    if rustix::process::geteuid().is_root() {
+        let _ = shadow_core::process::setuid(0);
     }
 
     let _signals = shadow_core::hardening::SignalBlocker::block_critical()

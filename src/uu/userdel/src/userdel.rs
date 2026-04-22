@@ -96,7 +96,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let root = SysRoot::new(prefix);
 
     // Must be root.
-    if !nix::unistd::getuid().is_root() {
+    if !rustix::process::getuid().is_root() {
         return Err(UserdelError::CantUpdatePasswd("Permission denied.".into()).into());
     }
 
@@ -434,7 +434,7 @@ mod tests {
     // Duplicated from tests/common/mod.rs — unit tests inside the crate
     // cannot import from the workspace-level tests directory.
     fn skip_unless_root() -> bool {
-        !nix::unistd::geteuid().is_root()
+        !rustix::process::geteuid().is_root()
     }
 
     #[test]

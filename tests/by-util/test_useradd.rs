@@ -110,7 +110,7 @@ fn test_defaults_flag() {
     // but we only care that clap parses it without error. If not root, we expect
     // exit 1 (permission denied).
     let code = run(&["useradd", "-D"]);
-    if nix::unistd::getuid().is_root() {
+    if rustix::process::getuid().is_root() {
         assert_eq!(code, 0, "-D should exit 0 when root");
     } else {
         assert_eq!(code, 1, "-D should exit 1 when not root");

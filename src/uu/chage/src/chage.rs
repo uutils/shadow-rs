@@ -518,10 +518,10 @@ fn do_chroot(dir: &str) -> Result<(), ChageError> {
     }
 
     let path = Path::new(dir);
-    nix::unistd::chroot(path)
+    rustix::process::chroot(path)
         .map_err(|e| ChageError::UnexpectedFailure(format!("cannot chroot to '{dir}': {e}")))?;
 
-    nix::unistd::chdir("/").map_err(|e| {
+    rustix::process::chdir("/").map_err(|e| {
         ChageError::UnexpectedFailure(format!("cannot chdir to / after chroot: {e}"))
     })?;
 
@@ -536,8 +536,8 @@ where
 {
     // Consolidate real + effective UID to root for file operations.
     // Some filesystem configurations check real UID.
-    if nix::unistd::geteuid().is_root() {
-        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
+    if rustix::process::geteuid().is_root() {
+        let _ = shadow_core::process::setuid(0);
     }
 
     // Block signals for the entire critical section (lock -> write -> unlock).

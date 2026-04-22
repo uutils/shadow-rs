@@ -98,7 +98,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .map(Path::new);
     let root = SysRoot::new(prefix);
 
-    if !nix::unistd::getuid().is_root() {
+    if !rustix::process::getuid().is_root() {
         return Err(UsermodError::CantUpdate("Permission denied.".into()).into());
     }
 
@@ -331,7 +331,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 /// Uses `fchownat` with `AT_SYMLINK_NOFOLLOW` so symlinks themselves are
 /// re-owned without following them.
 fn recursive_chown(path: &Path, old_uid: u32, new_uid: u32) {
-    use nix::fcntl::AtFlags;
     use std::os::unix::fs::MetadataExt;
 
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -339,12 +338,12 @@ fn recursive_chown(path: &Path, old_uid: u32, new_uid: u32) {
             let entry_path = entry.path();
             if let Ok(meta) = std::fs::symlink_metadata(&entry_path) {
                 if meta.uid() == old_uid {
-                    let _ = nix::unistd::fchownat(
-                        nix::fcntl::AT_FDCWD,
+                    let _ = rustix::fs::chownat(
+                        rustix::fs::CWD,
                         &entry_path,
-                        Some(nix::unistd::Uid::from_raw(new_uid)),
+                        Some(rustix::process::Uid::from_raw(new_uid)),
                         None,
-                        AtFlags::AT_SYMLINK_NOFOLLOW,
+                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
                     );
                 }
                 if meta.is_dir() {
@@ -357,12 +356,12 @@ fn recursive_chown(path: &Path, old_uid: u32, new_uid: u32) {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.uid() == old_uid
     {
-        let _ = nix::unistd::fchownat(
-            nix::fcntl::AT_FDCWD,
+        let _ = rustix::fs::chownat(
+            rustix::fs::CWD,
             path,
-            Some(nix::unistd::Uid::from_raw(new_uid)),
+            Some(rustix::process::Uid::from_raw(new_uid)),
             None,
-            AtFlags::AT_SYMLINK_NOFOLLOW,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
         );
     }
 }
@@ -526,7 +525,7 @@ mod tests {
     }
 
     fn skip_unless_root() -> bool {
-        !nix::unistd::geteuid().is_root()
+        !rustix::process::geteuid().is_root()
     }
 
     #[test]

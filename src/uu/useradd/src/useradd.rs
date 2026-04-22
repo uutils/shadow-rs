@@ -1594,7 +1594,7 @@ mod tests {
 
     /// Skip tests that require root privileges.
     fn skip_unless_root() -> bool {
-        !nix::unistd::geteuid().is_root()
+        !rustix::process::geteuid().is_root()
     }
 
     #[test]

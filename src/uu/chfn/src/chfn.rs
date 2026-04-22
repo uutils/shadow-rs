@@ -140,10 +140,10 @@ fn do_chroot(dir: &str) -> Result<(), ChfnError> {
     }
 
     let path = std::path::Path::new(dir);
-    nix::unistd::chroot(path)
+    rustix::process::chroot(path)
         .map_err(|e| ChfnError::Error(format!("cannot chroot to '{dir}': {e}")))?;
 
-    nix::unistd::chdir("/")
+    rustix::process::chdir("/")
         .map_err(|e| ChfnError::Error(format!("cannot chdir to / after chroot: {e}")))?;
 
     Ok(())
@@ -160,8 +160,8 @@ where
     F: FnOnce(&mut PasswdEntry) -> Result<(), String>,
 {
     // Consolidate real + effective UID to root for file operations.
-    if nix::unistd::geteuid().is_root() {
-        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
+    if rustix::process::geteuid().is_root() {
+        let _ = shadow_core::process::setuid(0);
     }
 
     let _signals = shadow_core::hardening::SignalBlocker::block_critical()

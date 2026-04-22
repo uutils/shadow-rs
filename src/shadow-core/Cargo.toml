@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = { workspace = true }
-nix = { workspace = true }
+rustix = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }

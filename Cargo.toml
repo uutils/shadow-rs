@@ -59,7 +59,7 @@ uucore = "0.7"
 thiserror = "2"
 
 # Unix/Linux
-nix = { version = "0.30", features = ["user", "fs", "process", "signal", "term", "resource"] }
+rustix = { version = "1", features = ["process", "fs", "termios"] }
 libc = "0.2"
 
 # Security
@@ -205,7 +205,7 @@ usermod = { version = "0.0.1", package = "uu_usermod", path = "src/uu/usermod" }
 pwck = { version = "0.0.1", package = "uu_pwck", path = "src/uu/pwck" }
 grpck = { version = "0.0.1", package = "uu_grpck", path = "src/uu/grpck" }
 shadow-core = { path = "src/shadow-core", features = ["shadow"] }
-nix = { workspace = true }
+rustix = { workspace = true }
 tempfile = { workspace = true }
 
 [profile.release]

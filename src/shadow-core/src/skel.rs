@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_copy_files() {
-        if !nix::unistd::geteuid().is_root() {
+        if !rustix::process::geteuid().is_root() {
             return;
         }
 
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_copy_subdirectory() {
-        if !nix::unistd::geteuid().is_root() {
+        if !rustix::process::geteuid().is_root() {
             return;
         }
 
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_copy_symlink() {
-        if !nix::unistd::geteuid().is_root() {
+        if !rustix::process::geteuid().is_root() {
             return;
         }
 

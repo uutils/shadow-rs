@@ -14,8 +14,16 @@
 /// A core dump from a setuid-root process could expose password hashes
 /// and plaintext passwords.
 pub fn suppress_core_dumps() {
-    let _ = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0);
-    // PR_SET_DUMPABLE via nix::sys::prctl (no raw unsafe needed).
+    use rustix::process::{Resource, Rlimit, setrlimit};
+
+    let _ = setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        },
+    );
+    // PR_SET_DUMPABLE via prctl (no raw unsafe needed).
     // nix doesn't expose prctl directly, so we skip it rather than use unsafe.
     // RLIMIT_CORE=0 is sufficient to prevent core dumps.
 }
@@ -25,10 +33,14 @@ pub fn suppress_core_dumps() {
 /// A malicious caller could `ulimit -f 1` before invoking a setuid-root
 /// tool, causing `/etc/shadow` to be truncated mid-write.
 pub fn raise_file_size_limit() {
-    let _ = nix::sys::resource::setrlimit(
-        nix::sys::resource::Resource::RLIMIT_FSIZE,
-        nix::sys::resource::RLIM_INFINITY,
-        nix::sys::resource::RLIM_INFINITY,
+    use rustix::process::{Resource, Rlimit, setrlimit};
+
+    let _ = setrlimit(
+        Resource::Fsize,
+        Rlimit {
+            current: None,
+            maximum: None,
+        },
     );
 }
 
@@ -121,19 +133,35 @@ pub fn harden_process() -> Vec<(String, String)> {
 /// `geteuid()` is 0 for all callers, but the real UID identifies who
 /// actually invoked the program.
 pub fn caller_is_root() -> bool {
-    nix::unistd::getuid().is_root()
+    rustix::process::getuid().is_root()
 }
 
 /// Return the current user's username from the real UID.
 pub fn current_username() -> Result<String, crate::error::ShadowError> {
-    let uid = nix::unistd::getuid();
-    match nix::unistd::User::from_uid(uid) {
-        Ok(Some(user)) => Ok(user.name),
-        Ok(None) => Err(crate::error::ShadowError::Other(
+    let uid = rustix::process::getuid().as_raw();
+    lookup_username_by_uid(uid)
+}
+
+/// Look up a username by UID from `/etc/passwd`.
+pub fn lookup_username_by_uid(uid: u32) -> Result<String, crate::error::ShadowError> {
+    let entries = crate::passwd::read_passwd_file(std::path::Path::new("/etc/passwd"))?;
+    match entries.iter().find(|e| e.uid == uid) {
+        Some(entry) => Ok(entry.name.clone()),
+        None => Err(crate::error::ShadowError::Other(
             format!("cannot determine username for uid {uid}").into(),
         )),
-        Err(e) => Err(crate::error::ShadowError::Other(
-            format!("cannot determine username: {e}").into(),
+    }
+}
+
+/// Look up a passwd entry by UID from `/etc/passwd`.
+pub fn lookup_passwd_entry_by_uid(
+    uid: u32,
+) -> Result<crate::passwd::PasswdEntry, crate::error::ShadowError> {
+    let entries = crate::passwd::read_passwd_file(std::path::Path::new("/etc/passwd"))?;
+    match entries.into_iter().find(|e| e.uid == uid) {
+        Some(entry) => Ok(entry),
+        None => Err(crate::error::ShadowError::Other(
+            format!("no passwd entry for uid {uid}").into(),
         )),
     }
 }
@@ -149,35 +177,22 @@ pub fn current_username() -> Result<String, crate::error::ShadowError> {
 /// inconsistent state or holding a stale lock. The original signal mask
 /// is restored when the guard is dropped.
 pub struct SignalBlocker {
-    old_mask: nix::sys::signal::SigSet,
+    saved: crate::process::SavedSigSet,
 }
 
 impl SignalBlocker {
     /// Block `SIGINT`, `SIGTERM`, `SIGHUP` to prevent partial file writes.
     pub fn block_critical() -> Result<Self, crate::error::ShadowError> {
-        use nix::sys::signal::{SigSet, SigmaskHow, Signal};
+        let saved = crate::process::block_critical_signals().map_err(|e| {
+            crate::error::ShadowError::Other(format!("cannot block signals: {e}").into())
+        })?;
 
-        let mut block_set = SigSet::empty();
-        block_set.add(Signal::SIGINT);
-        block_set.add(Signal::SIGTERM);
-        block_set.add(Signal::SIGHUP);
-
-        let mut old_mask = SigSet::empty();
-        nix::sys::signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&block_set), Some(&mut old_mask))
-            .map_err(|e| {
-                crate::error::ShadowError::Other(format!("cannot block signals: {e}").into())
-            })?;
-
-        Ok(Self { old_mask })
+        Ok(Self { saved })
     }
 }
 
 impl Drop for SignalBlocker {
     fn drop(&mut self) {
-        let _ = nix::sys::signal::sigprocmask(
-            nix::sys::signal::SigmaskHow::SIG_SETMASK,
-            Some(&self.old_mask),
-            None,
-        );
+        let _ = crate::process::restore_signals(&self.saved);
     }
 }

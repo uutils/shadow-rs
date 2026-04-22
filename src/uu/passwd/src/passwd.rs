@@ -479,16 +479,16 @@ fn cmd_status(root: &SysRoot, target_user: Option<&str>) -> UResult<()> {
 /// actual caller, not root. The destructor re-elevates.
 #[cfg_attr(not(feature = "pam"), allow(dead_code))]
 struct PrivDrop {
-    original_euid: nix::unistd::Uid,
+    original_euid: u32,
 }
 
 impl PrivDrop {
     /// Drop effective UID to the given UID.
     #[cfg_attr(not(feature = "pam"), allow(dead_code))]
-    fn drop_to(uid: nix::unistd::Uid) -> Result<Self, PasswdError> {
-        let original_euid = nix::unistd::geteuid();
+    fn drop_to(uid: u32) -> Result<Self, PasswdError> {
+        let original_euid = rustix::process::geteuid().as_raw();
         if original_euid != uid {
-            nix::unistd::seteuid(uid).map_err(|e| {
+            shadow_core::process::seteuid(uid).map_err(|e| {
                 PasswdError::UnexpectedFailure(format!("cannot drop privileges: {e}"))
             })?;
         }
@@ -498,7 +498,7 @@ impl PrivDrop {
 
 impl Drop for PrivDrop {
     fn drop(&mut self) {
-        if let Err(e) = nix::unistd::seteuid(self.original_euid) {
+        if let Err(e) = shadow_core::process::seteuid(self.original_euid) {
             // Failing to restore privileges is a critical error — log it loudly.
             // We can't return an error from Drop, so at least make it visible.
             let _ = writeln!(
@@ -543,7 +543,7 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()>
 
         // Drop privileges to caller's real UID during PAM conversation.
         // Re-elevate automatically when _priv_drop goes out of scope.
-        let _priv_drop = PrivDrop::drop_to(nix::unistd::getuid())?;
+        let _priv_drop = PrivDrop::drop_to(rustix::process::getuid().as_raw())?;
 
         // Non-root users changing their own password must authenticate first.
         if !shadow_core::hardening::caller_is_root() {
@@ -571,7 +571,7 @@ fn cmd_pam_change(matches: &clap::ArgMatches, _target_user: &str) -> UResult<()>
         audit::log_user_event(
             "CHNG_PASSWD",
             _target_user,
-            nix::unistd::getuid().as_raw(),
+            rustix::process::getuid().as_raw(),
             true,
         );
 
@@ -598,16 +598,8 @@ fn resolve_target_user(matches: &clap::ArgMatches) -> Result<String, PasswdError
     }
 
     // No user specified — default to current user.
-    let uid = nix::unistd::getuid();
-    match nix::unistd::User::from_uid(uid) {
-        Ok(Some(user)) => Ok(user.name),
-        Ok(None) => Err(PasswdError::UnexpectedFailure(format!(
-            "cannot determine current username for uid {uid}"
-        ))),
-        Err(e) => Err(PasswdError::UnexpectedFailure(format!(
-            "cannot determine current username: {e}"
-        ))),
-    }
+    shadow_core::hardening::current_username()
+        .map_err(|e| PasswdError::UnexpectedFailure(e.to_string()))
 }
 
 /// Perform `chroot(2)` into the specified directory.
@@ -622,10 +614,10 @@ fn do_chroot(dir: &str) -> Result<(), PasswdError> {
     }
 
     let path = std::path::Path::new(dir);
-    nix::unistd::chroot(path)
+    rustix::process::chroot(path)
         .map_err(|e| PasswdError::UnexpectedFailure(format!("cannot chroot to '{dir}': {e}")))?;
 
-    nix::unistd::chdir("/").map_err(|e| {
+    rustix::process::chdir("/").map_err(|e| {
         PasswdError::UnexpectedFailure(format!("cannot chdir to / after chroot: {e}"))
     })?;
 
@@ -693,8 +685,8 @@ where
 {
     // Consolidate real + effective UID to root for file operations.
     // Some filesystem configurations check real UID.
-    if nix::unistd::geteuid().is_root() {
-        let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(0));
+    if rustix::process::geteuid().is_root() {
+        let _ = shadow_core::process::setuid(0);
     }
 
     // Block signals for the entire critical section (lock → write → unlock).
@@ -763,7 +755,7 @@ where
     audit::log_user_event(
         "CHNG_PASSWD",
         username,
-        nix::unistd::getuid().as_raw(),
+        rustix::process::getuid().as_raw(),
         true,
     );
 
@@ -1045,7 +1037,7 @@ mod tests {
     /// and cross-user status tests now require euid 0. In CI these run inside
     /// a Docker container as root.
     fn skip_unless_root() -> bool {
-        !nix::unistd::geteuid().is_root()
+        !rustix::process::geteuid().is_root()
     }
 
     /// Helper to create a temp dir with an etc/shadow file.
@@ -1431,23 +1423,33 @@ mod tests {
 
     #[test]
     fn test_core_dump_suppression() {
+        use rustix::process::{Resource, getrlimit};
         // After calling suppress_core_dumps(), RLIMIT_CORE should be 0.
         shadow_core::hardening::suppress_core_dumps();
-        let (soft, _hard) =
-            nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE).unwrap();
-        assert_eq!(soft, 0, "RLIMIT_CORE should be 0 after suppression");
+        let rlim = getrlimit(Resource::Core);
+        assert_eq!(
+            rlim.current,
+            Some(0),
+            "RLIMIT_CORE should be 0 after suppression"
+        );
     }
 
     #[test]
     fn test_raise_file_size_limit() {
+        use rustix::process::{Resource, getrlimit};
         shadow_core::hardening::raise_file_size_limit();
-        let (soft, _hard) =
-            nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_FSIZE).unwrap();
+        let rlim = getrlimit(Resource::Fsize);
         // In environments where the hard limit is already restricted (containers,
-        // CI), we may not reach RLIM_INFINITY. Verify it's at least very large.
+        // CI), we may not reach RLIM_INFINITY. `None` means unlimited.
+        // Verify it's at least very large or unlimited.
+        let is_large = match rlim.current {
+            None => true,
+            Some(v) => v >= 1024 * 1024 * 1024,
+        };
         assert!(
-            soft >= 1024 * 1024 * 1024 || soft == nix::sys::resource::RLIM_INFINITY,
-            "RLIMIT_FSIZE should be raised (got {soft})"
+            is_large,
+            "RLIMIT_FSIZE should be raised (got {:?})",
+            rlim.current
         );
     }
 

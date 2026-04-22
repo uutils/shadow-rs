@@ -372,7 +372,7 @@ fn prompt_for_input(
 ///
 /// Opens `/dev/tty` once with read+write mode (not stdin) to ensure we talk
 /// to the real terminal even if stdin has been redirected. Uses
-/// `nix::sys::termios` to disable `ECHO` for password prompts and restores
+/// `rustix::termios` to disable `ECHO` for password prompts and restores
 /// the original settings afterward (including on error, via a drop guard).
 fn read_from_tty(message: &PamMessage, echo: bool) -> io::Result<zeroize::Zeroizing<String>> {
     let mut tty = File::options().read(true).write(true).open("/dev/tty")?;
@@ -482,26 +482,28 @@ fn free_responses(responses: *mut PamResponse, count: usize) {
 
 /// RAII guard that disables terminal echo and restores it on drop.
 ///
-/// Uses `nix::sys::termios` to manipulate the terminal's local flags. The
+/// Uses `rustix::termios` to manipulate the terminal's local flags. The
 /// original settings are saved and restored when the guard is dropped, even
 /// if the caller returns early or panics.
 struct EchoGuard {
     fd: libc::c_int,
-    original: nix::sys::termios::Termios,
+    original: rustix::termios::Termios,
 }
 
 impl EchoGuard {
     /// Disable echo on the given terminal file.
     fn disable(tty: &File) -> io::Result<Self> {
-        use nix::sys::termios::{self, LocalFlags, SetArg};
+        use std::os::unix::io::AsFd;
 
         let fd = tty.as_raw_fd();
-        let original = termios::tcgetattr(tty).map_err(io::Error::other)?;
+        let original = rustix::termios::tcgetattr(tty.as_fd()).map_err(io::Error::other)?;
 
         let mut noecho = original.clone();
-        noecho.local_flags &= !(LocalFlags::ECHO | LocalFlags::ECHONL);
+        noecho.local_modes &=
+            !(rustix::termios::LocalModes::ECHO | rustix::termios::LocalModes::ECHONL);
 
-        termios::tcsetattr(tty, SetArg::TCSANOW, &noecho).map_err(io::Error::other)?;
+        rustix::termios::tcsetattr(tty.as_fd(), rustix::termios::OptionalActions::Now, &noecho)
+            .map_err(io::Error::other)?;
 
         Ok(Self { fd, original })
     }
@@ -516,7 +518,7 @@ impl Drop for EchoGuard {
         use std::os::unix::io::BorrowedFd;
         let fd = unsafe { BorrowedFd::borrow_raw(self.fd) };
         let _ =
-            nix::sys::termios::tcsetattr(fd, nix::sys::termios::SetArg::TCSANOW, &self.original);
+            rustix::termios::tcsetattr(fd, rustix::termios::OptionalActions::Now, &self.original);
     }
 }
 
