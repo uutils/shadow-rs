@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `audit.yml` workflow for daily `cargo-audit` security advisory checks (#155)
+- AT_EXECFN validation in multicall binary: rejects spoofed `argv[0]` in
+  setuid context by comparing against the kernel-recorded executable path (#154)
+
+### Changed
+
+- AT_EXECFN check uses `rustix::param::linux_execfn()` instead of unsafe
+  `libc::getauxval` — zero new unsafe for this feature
+- All workspace crate versions aligned to 0.2.0
+
 ## [0.2.0] - 2026-04-22
 
 ### Added
