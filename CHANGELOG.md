@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `passwd`/`chfn`/`chsh`/`newgrp` are setuid-root; the other 10 are `0755`.
   The previous multicall install is available as `make install-multicall`.
 
+### Security
+
+- PAM password buffers zeroed immediately after use (`zeroize`)
+- `initgroups()` called in newgrp before exec (prevents supplementary group leak)
+- `SignalBlocker` scoped to file-mutation critical sections only; dropped before
+  long-running operations (home deletion, recursive chown, skel copy)
+- `UmaskGuard` marked `!Send`/`!Sync` via `PhantomData<Rc<()>>` (thread-safety)
+- `newgrp` uses targeted hardening (`suppress_core_dumps` + `sanitized_env`)
+  instead of `harden_process()` to avoid leaking `RLIMIT_FSIZE` to exec'd shell
+- `atomic_write` retries once on stale temp file from prior crash
+- `crypt(3)` wrapper documented as non-thread-safe (uses global state)
+- Centralized hardening utilities in `shadow_core::hardening` (deduplicated
+  from per-tool copies)
+- `println!`/`eprintln!` replaced with non-panicking writes (#141)
+- Unwind tables suppressed via `-C force-unwind-tables=no` (#143)
+
 ### Fixed
 
 - Password hash validation rejects `:`, `\n`, `\r` (field injection prevention)
@@ -55,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recursive chown on UID change (usermod)
 - Proper date validation with leap year and month-length rules
 - GNU-compatible output and exit codes for all tools
-- 460+ unit tests, property-based tests (proptest), 4 fuzz targets
+- 580+ unit tests, property-based tests (proptest), 6 fuzz targets
 - Integration tests for 14 tools
 - Docker test matrix: Debian (glibc), Alpine (musl), Fedora (SELinux)
 - CI gates: fmt, clippy, test, MSRV (1.94.0), cargo-deny

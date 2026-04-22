@@ -25,6 +25,13 @@ Techniques adopted from OpenBSD and best practices for setuid-root tools.
 - [x] O_CLOEXEC on file descriptors (#50)
 - [x] Umask reset (#51 — `UmaskGuard` RAII)
 - [x] Landlock filesystem restriction (#41 — `apply_landlock()` in passwd)
+- [x] PAM password buffer zeroization (immediate `zeroize` after use)
+- [x] `initgroups()` in newgrp (prevent supplementary group leak across exec)
+- [x] `UmaskGuard` `!Send`/`!Sync` (`PhantomData<Rc<()>>` — prevent cross-thread umask corruption)
+- [x] `atomic_write` retry on stale temp file from prior crash
+- [x] `SignalBlocker` scoped to critical sections only (dropped before long-running ops)
+- [x] Centralized hardening in `shadow_core::hardening` (deduplicated across tools)
+- [x] Targeted hardening in newgrp (no `RLIMIT_FSIZE` leak to exec'd shell)
 
 ## Not Yet Implemented
 
