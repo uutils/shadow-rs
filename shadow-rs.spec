@@ -1,5 +1,5 @@
 Name:           shadow-rs
-Version:        0.0.1
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Memory-safe reimplementation of shadow-utils in Rust
 License:        MIT
