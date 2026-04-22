@@ -59,7 +59,7 @@ uucore = "0.8"
 thiserror = "2"
 
 # Unix/Linux
-rustix = { version = "1", features = ["process", "fs", "termios"] }
+rustix = { version = "1", features = ["process", "fs", "termios", "param"] }
 libc = "0.2"
 
 # Security

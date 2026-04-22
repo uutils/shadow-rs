@@ -277,22 +277,11 @@ pub fn lookup_username(uid: u32) -> io::Result<Option<String>> {
 /// from the ELF auxiliary vector records the real path the kernel executed,
 /// which cannot be spoofed from userspace.
 ///
-/// Returns `true` if the basenames match (or if `AT_EXECFN` is unavailable).
-/// Returns `false` if they differ — the caller should abort.
+/// Returns `true` if the basenames match, `false` if they differ.
 pub fn verify_argv0_matches_execfn(argv0: &str) -> bool {
-    // SAFETY: getauxval is a standard glibc/musl function. AT_EXECFN returns
-    // a pointer to a null-terminated string in the auxiliary vector, valid for
-    // the lifetime of the process.
-    let execfn_ptr = unsafe { libc::getauxval(libc::AT_EXECFN) } as *const libc::c_char;
-    if execfn_ptr.is_null() {
-        // AT_EXECFN not available (old kernel or non-Linux) — allow.
-        return true;
-    }
-    let execfn = unsafe { CStr::from_ptr(execfn_ptr) };
+    let execfn = rustix::param::linux_execfn();
     let execfn = execfn.to_string_lossy();
 
-    // Compare basenames: argv[0] might be "passwd" while AT_EXECFN is
-    // "/usr/sbin/passwd" or "/usr/sbin/shadow-rs".
     let argv0_base = std::path::Path::new(argv0)
         .file_name()
         .map(|n| n.to_string_lossy())
