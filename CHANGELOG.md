@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Centralized hardening utilities in `shadow_core::hardening` (deduplicated
   from per-tool copies)
 - `println!`/`eprintln!` replaced with non-panicking writes (#141)
-- Unwind tables suppressed in release builds (`-C force-unwind-tables=no`, #143)
+- Unwind tables suppressed via `-C force-unwind-tables=no` (#143)
 
 ### Fixed
 
