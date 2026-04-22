@@ -1,0 +1,15 @@
+# Suppress unwind table generation in all builds.
+#
+# Since Rust 1.92, panic=abort no longer prevents unwind tables from being
+# emitted on Linux (see https://blog.rust-lang.org/2025/12/11/Rust-1.92.0/).
+# For setuid-root binaries, unwind tables leak internal binary layout
+# information. Disabling them removes that attack surface.
+#
+# strip=true in [profile.release] already removes debug symbols; this covers
+# the unwind tables that strip does not remove.
+#
+# Note: Cargo's per-profile rustflags (profile-rustflags) is not yet
+# stabilised as of Cargo 1.95. This flag is applied globally but is harmless
+# in debug builds (debug info already exposes far more than unwind tables).
+[build]
+rustflags = ["-C", "force-unwind-tables=no"]
