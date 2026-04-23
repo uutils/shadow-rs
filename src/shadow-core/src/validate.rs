@@ -39,7 +39,7 @@ pub fn validate_username(name: &str) -> Result<(), ShadowError> {
     }
 
     let mut chars = name.chars();
-    // Name is guaranteed non-empty by the check above.
+    // Reject empty names by requiring a first character here.
     let Some(first) = chars.next() else {
         return Err(ShadowError::Validation("username must not be empty".into()));
     };
