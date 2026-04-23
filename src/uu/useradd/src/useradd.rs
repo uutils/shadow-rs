@@ -15,7 +15,7 @@
 
 use std::fmt;
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
@@ -916,8 +916,23 @@ fn append_subid_entry(path: &Path, name: &str, count: u64) -> UResult<()> {
 ///
 /// Paths must already be resolved through `SysRoot` by the caller.
 fn create_home_directory(home_path: &Path, skel_path: &Path, uid: u32, gid: u32) -> UResult<()> {
-    // Use create_dir (not create_dir_all) to avoid TOCTOU between exists() and mkdir().
-    match std::fs::create_dir(home_path) {
+    // The kernel does not reset umask across setuid, so a caller-controlled
+    // inherited umask may still be in effect in our process. A non-zero umask
+    // can mask off requested permission bits, so even mkdir(0o700) is not
+    // guaranteed to result in 0o700 unless we clear it first (e.g., umask
+    // 0o700 would mask the user RWX bits and leave the dir at 0o000).
+    // Forcing umask to 0 makes the requested mode exact, regardless of caller
+    // environment; umask can only make the result less permissive than the
+    // mode we requested, never more. Scoped to the mkdir call only — chown
+    // doesn't need it, and copy_skel manages its own umask internally.
+    let mkdir_result = {
+        let _umask = shadow_core::atomic::UmaskGuard::zero();
+        std::fs::DirBuilder::new().mode(0o700).create(home_path)
+    };
+
+    // Use DirBuilder::mode() so mkdir(2) is called with 0o700 atomically.
+    // Use create (not recursive) to avoid TOCTOU between exists() and mkdir().
+    match mkdir_result {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             uucore::show_warning!(
@@ -935,15 +950,8 @@ fn create_home_directory(home_path: &Path, skel_path: &Path, uid: u32, gid: u32)
         }
     }
 
-    // Set permissions to 0700 (home directories should be private by default).
-    std::fs::set_permissions(home_path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-        UseraddError::CannotCreateHome(format!(
-            "cannot set permissions on '{}': {e}",
-            home_path.display()
-        ))
-    })?;
-
-    // Set ownership.
+    // The directory is 0o700 owned by root at this point — only root can
+    // traverse it, so the chown that follows transfers a private dir.
     std::os::unix::fs::chown(home_path, Some(uid), Some(gid)).map_err(|e| {
         UseraddError::CannotCreateHome(format!(
             "cannot set ownership on '{}': {e}",
@@ -1119,6 +1127,7 @@ pub fn uu_app() -> Command {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     // -----------------------------------------------------------------------
     // Clap validation tests
@@ -1774,6 +1783,62 @@ mod tests {
         // Check permissions.
         let meta = fs::metadata(&home).expect("metadata");
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    }
+
+    /// Local RAII guard used by the umask regression test.
+    struct UmaskRestore(rustix::fs::Mode);
+    impl Drop for UmaskRestore {
+        fn drop(&mut self) {
+            rustix::process::umask(self.0);
+        }
+    }
+
+    /// Serialize tests that mutate process-global umask. Without this, parallel
+    /// cargo test runs can leak umask=0 to unrelated tests creating files.
+    static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_integration_home_directory_ignores_inherited_umask() {
+        // Regression test for #157: an inherited umask must not weaken the
+        // home directory's final mode. Note that this test asserts the *final*
+        // mode after `create_home_directory` returns; it does not directly
+        // observe the mkdir(2) syscall, so a pre-fix implementation that did
+        // `mkdir(0o777)` followed by `chmod(0o700)` would also pass. The
+        // atomicity guarantee — mode set in the mkdir syscall itself, not
+        // after — is enforced by inspection of `DirBuilder::mode(0o700)` in
+        // the implementation. Catching the window directly would require
+        // strace / ptrace / eBPF, which is out of scope for a unit test.
+        if skip_unless_root() {
+            return;
+        }
+
+        // Hold the umask lock for the duration of the test so parallel
+        // cargo test runs don't observe our umask=0 in unrelated file ops.
+        let _serialize = UMASK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home/testuser");
+        let skel = dir.path().join("skel");
+        fs::create_dir_all(dir.path().join("home")).expect("create home parent");
+        fs::create_dir_all(&skel).expect("create skel");
+
+        // Set process umask to zero (most permissive setting), then create
+        // the home dir. The guard inside create_home_directory also sets
+        // umask to zero for the duration of the mkdir; this test asserts the
+        // final directory mode. `_restore` puts back the previously active
+        // umask when this scope exits.
+        let _restore = UmaskRestore(rustix::process::umask(rustix::fs::Mode::empty()));
+
+        create_home_directory(&home, &skel, 1000, 1000).expect("create home");
+
+        let meta = fs::metadata(&home).expect("metadata");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "home directory must be 0o700 even with permissive umask",
+        );
     }
 
     #[test]

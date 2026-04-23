@@ -22,19 +22,23 @@ use crate::error::ShadowError;
 /// RAII guard that saves and restores the process umask.
 ///
 /// On creation, sets the umask to zero so that file mode bits passed to
-/// `OpenOptions::mode()` are applied exactly. The original umask is restored
-/// when the guard is dropped, even on error or panic paths.
+/// `OpenOptions::mode()` (or `DirBuilder::mode()`) are applied exactly.
+/// The original umask is restored when the guard is dropped, even on
+/// error or panic paths.
 ///
 /// # Thread safety
 ///
 /// `umask(2)` is a process-wide operation. This guard is NOT safe to use
 /// from multiple threads concurrently. All shadow-rs tools are
-/// single-threaded, so this is not an issue in practice.
-struct UmaskGuard(rustix::fs::Mode, std::marker::PhantomData<std::rc::Rc<()>>);
+/// single-threaded, so this is not an issue in practice. The embedded
+/// `PhantomData<Rc<()>>` makes the guard `!Send`, preventing accidental
+/// movement across threads.
+pub struct UmaskGuard(rustix::fs::Mode, std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl UmaskGuard {
     /// Set umask to zero and return a guard that restores the original.
-    fn zero() -> Self {
+    #[must_use = "the umask is restored when the guard is dropped; binding to `_` drops it immediately"]
+    pub fn zero() -> Self {
         Self(
             rustix::process::umask(rustix::fs::Mode::empty()),
             std::marker::PhantomData,

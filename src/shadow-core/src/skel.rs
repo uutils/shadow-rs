@@ -8,8 +8,10 @@
 //! When `useradd -m` creates a home directory, it populates it with
 //! files from the skeleton directory (typically `/etc/skel`).
 
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+use crate::atomic::UmaskGuard;
 use crate::error::ShadowError;
 
 /// Recursively copy the skeleton directory into the target home directory.
@@ -27,6 +29,12 @@ pub fn copy_skel(skel_dir: &Path, home_dir: &Path, uid: u32, gid: u32) -> Result
         return Ok(());
     }
 
+    // Reset umask so the modes passed to mkdir/open are honored exactly.
+    // Without this, an inherited umask would leave copied files and
+    // subdirectories more permissive than the source until set_permissions
+    // is called — a window during which they are owned by root.
+    let _umask = UmaskGuard::zero();
+
     copy_dir_recursive(skel_dir, home_dir, uid, gid)
 }
 
@@ -42,12 +50,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path, uid: u32, gid: u32) -> Result<(), 
             .map_err(|e| ShadowError::IoPath(e, src_path.clone()))?;
 
         if file_type.is_dir() {
-            std::fs::create_dir(&dst_path).map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
-            // Preserve the source directory's permissions.
-            let src_perms = std::fs::metadata(&src_path)
+            // Preserve the source directory's permissions atomically by
+            // passing the mode to mkdir(2) via DirBuilder. Mask to permission
+            // and special bits only — `mode()` returns raw st_mode which
+            // includes file-type bits we must not pass to mkdir.
+            let src_mode = std::fs::metadata(&src_path)
                 .map_err(|e| ShadowError::IoPath(e, src_path.clone()))?
-                .permissions();
-            std::fs::set_permissions(&dst_path, src_perms)
+                .permissions()
+                .mode()
+                & 0o7777;
+            std::fs::DirBuilder::new()
+                .mode(src_mode)
+                .create(&dst_path)
                 .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
             copy_dir_recursive(&src_path, &dst_path, uid, gid)?;
         } else if file_type.is_symlink() {
@@ -56,7 +70,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path, uid: u32, gid: u32) -> Result<(), 
             std::os::unix::fs::symlink(&target, &dst_path)
                 .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
         } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)
+            // std::fs::copy uses File::create internally, which applies the
+            // umask and leaves a window where the file is more permissive
+            // than the source. Open the destination with the source's mode
+            // baked into the open(2) call instead. Mask raw st_mode to
+            // permission and special bits only.
+            let src_mode = std::fs::metadata(&src_path)
+                .map_err(|e| ShadowError::IoPath(e, src_path.clone()))?
+                .permissions()
+                .mode()
+                & 0o7777;
+            let mut src_file = std::fs::File::open(&src_path)
+                .map_err(|e| ShadowError::IoPath(e, src_path.clone()))?;
+            let mut dst_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(src_mode)
+                .open(&dst_path)
+                .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
+            std::io::copy(&mut src_file, &mut dst_file)
                 .map_err(|e| ShadowError::IoPath(e, dst_path.clone()))?;
         }
         // Silently skip FIFOs, sockets, and device nodes — copying them
