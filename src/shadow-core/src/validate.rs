@@ -31,10 +31,6 @@ const MAX_USERNAME_LEN: usize = 32;
 ///
 /// Returns `ShadowError::Validation` if the username violates any rule.
 pub fn validate_username(name: &str) -> Result<(), ShadowError> {
-    if name.is_empty() {
-        return Err(ShadowError::Validation("username must not be empty".into()));
-    }
-
     if name.len() > MAX_USERNAME_LEN {
         return Err(ShadowError::Validation(
             format!("username '{name}' exceeds maximum length of {MAX_USERNAME_LEN} characters")
@@ -43,9 +39,9 @@ pub fn validate_username(name: &str) -> Result<(), ShadowError> {
     }
 
     let mut chars = name.chars();
-    // Name is guaranteed non-empty by the check above.
+    // Reject empty names by requiring a first character here.
     let Some(first) = chars.next() else {
-        unreachable!("empty name already rejected");
+        return Err(ShadowError::Validation("username must not be empty".into()));
     };
 
     if !first.is_ascii_lowercase() && first != '_' {
