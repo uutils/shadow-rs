@@ -71,11 +71,14 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             docker compose build ${{ matrix.target }} && exit 0
-            echo "::warning::'${{ matrix.target }}' image build attempt $attempt failed (likely a registry timeout); retrying in 30s"
-            sleep 30
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::'${{ matrix.target }}' image build attempt $attempt failed (likely a registry timeout); retrying in 30s"
+              sleep 30
+            fi
           done
           exit 1
-      # CARGO_NET_RETRY is passed into the container so cargo retries crate
-      # downloads; a real test failure still fails fast (no step-level retry).
+      # Forward the workflow-wide CARGO_NET_RETRY into the container (single
+      # source of truth) so cargo retries crate downloads; a real test failure
+      # still fails fast (no step-level retry).
       - name: Test on ${{ matrix.target }}
-        run: docker compose run --rm -e CARGO_NET_RETRY=10 ${{ matrix.target }} cargo test --workspace
+        run: docker compose run --rm -e CARGO_NET_RETRY ${{ matrix.target }} cargo test --workspace
