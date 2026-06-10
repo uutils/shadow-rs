@@ -109,7 +109,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     if !shadow_core::hardening::caller_is_root() {
-        uucore::show_error!("Permission denied.");
+        uucore::show_error!("{}", shadow_core::os_error::permission_denied());
         return Err(GroupaddError::AlreadyPrinted(1).into());
     }
 
